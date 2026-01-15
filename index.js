@@ -369,6 +369,10 @@ const PRODUCTS = [
   const WA_TOKEN = process.env.WA_TOKEN;
   const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+// Número de WhatsApp donde quieres recibir los pedidos ya listos (sin +, solo dígitos)
+const ADMIN_PHONE = "18492010239"; // EJEMPLO: "18295828578"
+const ORDER_TAG = "PEDIDO_CONFIRMADO:";
+
 
   // Memoria simple por número de WhatsApp
   const memory = new Map(); // key: waNumber -> [{ role, content }]
@@ -387,55 +391,70 @@ const PRODUCTS = [
 
   return `
 Eres un asistente de ventas por WhatsApp de la tienda "Glowny Essentials" en República Dominicana.
-Tu objetivo: ayudar al cliente, recomendar productos y cerrar ventas.
+Tu objetivo es ayudar al cliente, recomendar productos y cerrar ventas.
 
-TONO:
-- Cercano, claro y profesional.
-- Responde siempre en español dominicano neutro, sin emojis a menos que el cliente los use mucho.
+REGLAS GENERALES
+- Escribe siempre en tono cercano, amable y profesional.
+- Responde en párrafos cortos y fáciles de leer por WhatsApp.
+- Usa emojis de forma moderada.
+- Si algo no está claro, haz preguntas de seguimiento antes de asumir.
+- Hablas siempre en español.
 
-CATÁLOGO RESUMIDO (para que veas nombres, categorías y precios):
-${catalogText}
+DATOS QUE SIEMPRE DEBES PEDIR PARA UN PEDIDO
+Antes de confirmar un pedido, asegúrate de tener:
 
-CATÁLOGO EN FORMATO JSON (usa estos datos cuando necesites campos específicos como "image"):
-${catalogJson}
+1) Producto(s) y cantidad.
+2) Nombre del cliente.
+3) Teléfono de contacto (si es distinto al número de WhatsApp).
+4) UBICACIÓN PRECISA: calle, número o residencial, sector, ciudad y referencias claras para llegar.
+   - Pregunta explícitamente por referencias, por ejemplo:
+     "¿Alguna referencia para llegar? (color de la casa, negocio cercano, etc.)"
+5) Método de pago (transferencia, efectivo contra entrega, etc.).
 
-REGLAS IMPORTANTES:
-- Nunca inventes productos ni precios que no estén en el catálogo.
-- Si no encuentras algo en el catálogo, dilo claramente y ofrece alternativas similares.
-- Siempre que des un precio, incluye la moneda: "RD$".
+No confirmes un pedido hasta tener la dirección precisa + referencias + forma de pago.
 
-REGLAS PARA FOTOS / IMÁGENES:
-- Si el cliente pide ver la foto, imagen, presentación, cómo viene, cómo se ve, etc. de un producto específico,
-  y en el JSON del catálogo ese producto tiene un campo "image" con la URL:
-  => RESPONDE **SOLO** con esta estructura (sin nada más de texto):
-     IMG: <URL_de_imagen>
+FORMATO ESPECIAL PARA PEDIDO CONFIRMADO
+Cuando el cliente diga que SÍ quiere completar el pedido y ya tengas todos los datos,
+debes responder en UN SOLO MENSAJE con dos partes:
 
-  Ejemplos de lo que debes devolver:
-  - "IMG: https://misitio.com/imagenes/crema_facial_50ml.png"
-  - "IMG: https://glowny-essentials.vercel.app/imagenes/protector_labial.png"
+1) Texto normal para el cliente (explicando que el pedido quedó registrado, tiempos de entrega, etc.).
+2) En una nueva línea, escribe EXACTAMENTE:
 
-- NO agregues texto adicional si devuelves una imagen. Solo la línea "IMG: ..." y ya.
-- En cualquier otra situación (dudas, recomendaciones, precios, etc.) responde normalmente con texto,
-  sin usar el formato IMG:.
+PEDIDO_CONFIRMADO: { ... JSON con el resumen del pedido ... }
 
-FLUJO DE VENTA RECOMENDADO:
-1. Saluda y pregunta qué tipo de producto busca (protección solar, cuidado facial, etc.).
-2. Haz 1–2 preguntas para entender tipo de piel, uso (día, playa, diario), edad aproximada si aplica.
-3. Recomienda 1–3 productos concretos del catálogo con nombre y precio en RD$.
-4. Ofrece ayuda para hacer el pedido y pide:
-   - Nombre
-   - Sector / ciudad
-   - Teléfono de contacto (si no es el mismo)
-   - Dirección de entrega
-5. Si el cliente duda, ofrece alternativas (ej. “más económico”, “para piel sensible”, etc.).
+Ejemplo de respuesta completa:
 
-RESPUESTAS CORTAS Y CLARAS:
-- Usa párrafos cortos y viñetas cuando sea útil.
-- No des listas eternas; máximo 3 opciones bien explicadas.
+Perfecto, ya tengo tu pedido listo 🙌
+Te estaríamos enviando tu protector solar a Invivienda, Santo Domingo Este. El tiempo estimado de entrega es de 24-48 horas luego de confirmar el pago. Cualquier duda estoy por aquí.
 
-Recuerda: estás chateando por WhatsApp para Glowny Essentials, y tienes acceso al catálogo de productos y sus imágenes (campo "image").
+PEDIDO_CONFIRMADO: {
+  "cliente": "María Pérez",
+  "telefono": "8090000000",
+  "direccion": "Calle 1 #23, Residencial X, Invivienda, Santo Domingo Este",
+  "referencias": "Casa blanca de dos niveles frente al colmado La Esquina",
+  "productos": [
+    {"nombre": "Crema solar facial FPS 50+ Deliplus 50 ml", "cantidad": 1, "precio": 700}
+  ],
+  "total_estimado": 700,
+  "forma_pago": "Transferencia",
+  "notas": "Cliente prefiere recibir en la tarde"
+}
+
+IMPORTANTE:
+- El contenido después de "PEDIDO_CONFIRMADO:" es solo para el SISTEMA, el cliente NO lo verá.
+- Asegúrate de que el JSON sea válido (usa comillas dobles en claves y textos).
+
+IMÁGENES DE PRODUCTO
+- Si el cliente te pide ver la presentación o foto de un producto, responde SOLO con:
+  IMG: <url_de_la_imagen>
+  (sin texto adicional).
+- El sistema usará esto para enviar la imagen nativa por WhatsApp.
+- Solo usa "IMG:" cuando quieras que el sistema envíe una imagen.
+
+Recuerda que tienes un catálogo interno de productos de Glowny Essentials (protector solar, colágeno, etc.) con nombres, presentaciones y precios en RD$. Utiliza ese catálogo para recomendar, cruzar productos y calcular totales aproximados.
 `;
 }
+
 
 
   async function callOpenAI(waNumber, userText) {
@@ -559,6 +578,7 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
   const value = changes?.value;
   const message = value?.messages?.[0];
 
+  // Si no hay mensaje, respondemos 200 para que Meta no reintente
   if (!message) {
     return res.sendStatus(200);
   }
@@ -567,10 +587,12 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
   const text = message.text?.body || "";
 
   try {
-    const rawReply = await callOpenAI(from, text);
-    const reply = (rawReply || "").trim();
+    const rawReply = (await callOpenAI(from, text)) || "";
+    let reply = rawReply.trim();
 
-    // Si el asistente pide enviar una imagen nativa:
+    console.log("Respuesta modelo:", reply);
+
+    // 1) ¿Es respuesta de imagen? (IMG: <url>)
     if (reply.toUpperCase().startsWith("IMG:")) {
       const imageUrl = reply.slice(4).trim();
 
@@ -578,18 +600,41 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
         await sendWhatsAppImage(
           from,
           imageUrl,
-          "Aquí tienes la presentación del producto 🧴 ¿Te ayudo a hacer tu pedido?"
+          "Aquí tienes la presentación del producto 🧴 ¿Te ayudo a completar tu pedido?"
         );
       } else {
-        // Si por alguna razón viene vacío, respondemos con texto normal
         await sendWhatsAppMessage(
           from,
           "No pude encontrar la imagen de ese producto, pero puedo ayudarte con la descripción y los precios."
         );
       }
     } else {
-      // Respuesta normal en texto
-      await sendWhatsAppMessage(from, reply);
+      // 2) ¿Incluye bloque de PEDIDO_CONFIRMADO?
+      let orderInfo = null;
+
+      if (reply.includes(ORDER_TAG)) {
+        const parts = reply.split(ORDER_TAG);
+        reply = parts[0].trim();          // Lo que verá el cliente
+        orderInfo = parts[1].trim();      // Solo para ti (admin)
+      }
+
+      // Enviar mensaje al cliente (si hay texto)
+      if (reply) {
+        await sendWhatsAppMessage(from, reply);
+      }
+
+      // Si hay un pedido confirmado, reenviarlo al número administrador
+      if (orderInfo) {
+        const adminText =
+          "📦 NUEVO PEDIDO CONFIRMADO - Glowny Essentials\n\n" +
+          orderInfo +
+          "\n\n" +
+          `Número del cliente (WhatsApp): ${from}\n` +
+          `Enlace al chat: https://wa.me/${from}`;
+
+        await sendWhatsAppMessage(ADMIN_PHONE, adminText);
+        console.log("✅ Pedido reenviado al administrador");
+      }
     }
   } catch (err) {
     console.error("Error manejando el mensaje:", err);
@@ -597,6 +642,7 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
 
   res.sendStatus(200);
 });
+
 
 
   const PORT = process.env.PORT || 10000;
