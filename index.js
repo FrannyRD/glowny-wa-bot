@@ -471,6 +471,42 @@ Tu tarea es responder los mensajes del cliente como si fueras una persona real d
     console.log("Respuesta de WhatsApp:", JSON.stringify(data, null, 2));
   }
 
+// NUEVO: enviar imagen nativa de WhatsApp
+async function sendWhatsAppImage(to, imageUrl, caption = "") {
+  const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
+
+  const body = {
+    messaging_product: "whatsapp",
+    to,
+    type: "image",
+    image: {
+      link: imageUrl,   // URL directa de la imagen (la que ya tienes en el catálogo)
+      caption,          // Texto que aparecerá debajo de la imagen
+    },
+  };
+
+  console.log("Enviando IMAGEN a WhatsApp:", JSON.stringify(body, null, 2));
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${WA_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const data = await resp.json();
+  console.log("Respuesta de WhatsApp (imagen):", JSON.stringify(data, null, 2));
+
+  if (!resp.ok) {
+    throw new Error(
+      `Error enviando imagen a WhatsApp: ${resp.status} ${resp.statusText}`
+    );
+  }
+}
+
+
   // Verificación del webhook (GET)
   app.get("/webhook", (req, res) => {
     const mode = req.query["hub.mode"];
