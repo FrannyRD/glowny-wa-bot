@@ -499,7 +499,7 @@ Si el cliente pide algo que no está en este listado, dilo claramente y sugiere 
   ];
 
   // ... resto igual: llamada a OpenAI, actualizar memoria, etc.
-}
+
 
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
