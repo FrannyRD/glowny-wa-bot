@@ -598,7 +598,6 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
   res.sendStatus(200);
 });
 
-  });
 
   const PORT = process.env.PORT || 10000;
   app.listen(PORT, () => {
