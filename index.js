@@ -18,6 +18,8 @@ const lastLocation = new Map(); // key: waNumber, value: { latitude, longitude, 
 
   // Memoria simple por número de WhatsApp
   const memory = new Map(); // key: waNumber -> [{ role, content }]
+// Producto por el que llegó el cliente desde anuncio / referral
+const entryProduct = new Map(); // key: waNumber, value: texto del anuncio/producto
 
   function buildCatalogText() {
     return PRODUCTS.map((p) => {
@@ -480,13 +482,25 @@ Si el cliente pide algo que no está en este listado, dilo claramente y sugiere 
 
 
   async function callOpenAI(waNumber, userText) {
-    const history = memory.get(waNumber) || [];
+  const history = memory.get(waNumber) || [];
 
-    const messages = [
-      { role: "system", content: getSystemPrompt() },
-      ...history,
-      { role: "user", content: userText },
-    ];
+  const baseSystem = getSystemPrompt();
+
+  // Contexto adicional si tenemos producto de entrada desde anuncio
+  const productFromAd = entryProduct.get(waNumber);
+  const extraSystem = productFromAd
+    ? `\n\nCONTEXTO DEL ANUNCIO:\nEl cliente llegó desde un anuncio o imagen relacionada con el producto: "${productFromAd}". Dale prioridad a ese producto en tus respuestas.`
+    : "";
+
+  const messages = [
+    { role: "system", content: baseSystem + extraSystem },
+    ...history,
+    { role: "user", content: userText },
+  ];
+
+  // ... resto igual: llamada a OpenAI, actualizar memoria, etc.
+}
+
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -599,6 +613,25 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
   const changes = entry?.changes?.[0];
   const value = changes?.value;
   const message = value?.messages?.[0];
+
+     const from = message.from; // número del cliente (ya lo usas)
+  let userText = "";
+
+  // 🔹 Si viene de anuncio o tiene referral, guardamos el contexto
+  if (message.referral) {
+    const ref = message.referral;
+    const posibleNombre =
+      ref.headline ||
+      ref.body ||
+      ref.source_url ||
+      "";
+
+    if (posibleNombre) {
+      console.log("➡️ Referral detectado para", from, "=>", posibleNombre);
+      entryProduct.set(from, posibleNombre);
+    }
+  }
+
 
   if (!message) {
     return res.sendStatus(200);
