@@ -372,6 +372,8 @@ const PRODUCTS = [
 // Número de WhatsApp donde quieres recibir los pedidos ya listos (sin +, solo dígitos)
 const ADMIN_PHONE = "18492010239"; // EJEMPLO: "18295828578"
 const ORDER_TAG = "PEDIDO_CONFIRMADO:";
+// Para guardar la última ubicación enviada por cada cliente
+const lastLocation = new Map(); // key: waNumber, value: { latitude, longitude, name, address }
 
 
   // Memoria simple por número de WhatsApp
@@ -406,12 +408,17 @@ Antes de confirmar un pedido, asegúrate de tener:
 1) Producto(s) y cantidad.
 2) Nombre del cliente.
 3) Teléfono de contacto (si es distinto al número de WhatsApp).
-4) UBICACIÓN PRECISA: calle, número o residencial, sector, ciudad y referencias claras para llegar.
-   - Pregunta explícitamente por referencias, por ejemplo:
-     "¿Alguna referencia para llegar? (color de la casa, negocio cercano, etc.)"
+4) UBICACIÓN PRECISA:
+   - Primero pídele al cliente que COMPARTA SU UBICACIÓN por el mapa de WhatsApp
+     (clip 📎 → “Ubicación” → “Enviar tu ubicación actual”).
+   - Si el cliente no puede mandar ubicación por mapa, entonces pide dirección escrita:
+     calle, número o residencial, sector, ciudad y referencias claras para llegar.
+   - Pregunta siempre por referencias (color de la casa, negocio cercano, etc.).
 5) Método de pago (transferencia, efectivo contra entrega, etc.).
 
-No confirmes un pedido hasta tener la dirección precisa + referencias + forma de pago.
+No confirmes un pedido hasta tener:
+- productos + nombre + forma de pago
+- Y AL MENOS una opción de ubicación: mapa compartido o dirección muy detallada.
 
 FORMATO ESPECIAL PARA PEDIDO CONFIRMADO
 Cuando el cliente diga que SÍ quiere completar el pedido y ya tengas todos los datos,
@@ -454,6 +461,7 @@ IMÁGENES DE PRODUCTO
 Recuerda que tienes un catálogo interno de productos de Glowny Essentials (protector solar, colágeno, etc.) con nombres, presentaciones y precios en RD$. Utiliza ese catálogo para recomendar, cruzar productos y calcular totales aproximados.
 `;
 }
+
 
 
 
@@ -578,21 +586,42 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
   const value = changes?.value;
   const message = value?.messages?.[0];
 
-  // Si no hay mensaje, respondemos 200 para que Meta no reintente
   if (!message) {
     return res.sendStatus(200);
   }
 
   const from = message.from; // número del cliente
-  const text = message.text?.body || "";
+  let userText = "";
+
+  // 🔹 Si el cliente envía ubicación por el mapa
+  if (message.type === "location" && message.location) {
+    const loc = message.location;
+
+    // Guardamos la última ubicación de este cliente
+    lastLocation.set(from, {
+      latitude: loc.latitude,
+      longitude: loc.longitude,
+      name: loc.name || "",
+      address: loc.address || ""
+    });
+
+    // Texto que verá el modelo (para que sepa que ya tiene ubicación)
+    userText =
+      "Te acabo de enviar mi ubicación por el mapa de WhatsApp 📍. " +
+      (loc.address ? `La dirección que muestra el mapa es: ${loc.address}.` : "");
+
+  } else {
+    // Mensaje normal de texto
+    userText = message.text?.body || "";
+  }
 
   try {
-    const rawReply = (await callOpenAI(from, text)) || "";
+    const rawReply = (await callOpenAI(from, userText)) || "";
     let reply = rawReply.trim();
 
     console.log("Respuesta modelo:", reply);
 
-    // 1) ¿Es respuesta de imagen? (IMG: <url>)
+    // 1) ¿Respuesta de imagen?  (IMG: <url>)
     if (reply.toUpperCase().startsWith("IMG:")) {
       const imageUrl = reply.slice(4).trim();
 
@@ -615,7 +644,7 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
       if (reply.includes(ORDER_TAG)) {
         const parts = reply.split(ORDER_TAG);
         reply = parts[0].trim();          // Lo que verá el cliente
-        orderInfo = parts[1].trim();      // Solo para ti (admin)
+        orderInfo = parts[1].trim();      // Resumen en JSON generado por el modelo
       }
 
       // Enviar mensaje al cliente (si hay texto)
@@ -625,15 +654,26 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
 
       // Si hay un pedido confirmado, reenviarlo al número administrador
       if (orderInfo) {
-        const adminText =
+        let adminText =
           "📦 NUEVO PEDIDO CONFIRMADO - Glowny Essentials\n\n" +
           orderInfo +
           "\n\n" +
           `Número del cliente (WhatsApp): ${from}\n` +
           `Enlace al chat: https://wa.me/${from}`;
 
+        // 🔹 Si tenemos ubicación en mapa guardada, la añadimos al mensaje
+        const loc = lastLocation.get(from);
+        if (loc) {
+          adminText +=
+            "\n\n📍 Ubicación enviada por mapa:\n" +
+            `Lat: ${loc.latitude}, Lon: ${loc.longitude}\n` +
+            `Google Maps: https://www.google.com/maps?q=${loc.latitude},${loc.longitude}\n` +
+            (loc.address ? `Dirección aproximada: ${loc.address}\n` : "") +
+            (loc.name ? `Nombre de ubicación: ${loc.name}\n` : "");
+        }
+
         await sendWhatsAppMessage(ADMIN_PHONE, adminText);
-        console.log("✅ Pedido reenviado al administrador");
+        console.log("✅ Pedido reenviado al administrador con ubicación (si estaba disponible)");
       }
     }
   } catch (err) {
@@ -642,6 +682,7 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
 
   res.sendStatus(200);
 });
+
 
 
 
