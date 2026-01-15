@@ -4,8 +4,6 @@ const PRODUCTS = [
     name: "Crema corporal hidratante Esferas VIT - E Deliplus con ácido hialurónico",
     category: "Cuerpo",
     price: 550,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.47356556525844695.jpg"
   },
   {
@@ -13,8 +11,6 @@ const PRODUCTS = [
     name: "Comprimidos efervescentes magnesio Deliplus 300 mg sabor naranja vitaminas B1, B6 y B12 20und/80g",
     category: "Suplementos",
     price: 400,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.6344341855892877.jpg"
   },
   {
@@ -22,8 +18,6 @@ const PRODUCTS = [
     name: "Aceite corporal rosa mosqueta Deliplus 100% puro y natural 30 ml",
     category: "Cuerpo",
     price: 950,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.01851007574591812.jpg"
   },
   {
@@ -31,8 +25,6 @@ const PRODUCTS = [
     name: "Aceite corporal romero Botella 200 ml Deliplus",
     category: "Cuerpo",
     price: 550,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.36263807809930526.jpg"
   },
   {
@@ -40,8 +32,6 @@ const PRODUCTS = [
     name: "Crema protección solar facial Deliplus FPS 50+ resistente al agua 50 ml",
     category: "Rostro",
     price: 700,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.07349553219793581.jpg"
   },
   {
@@ -49,8 +39,6 @@ const PRODUCTS = [
     name: "Crema facial protectora anti-manchas Deliplus FPS 50+ todo tipo de piel 50 ml",
     category: "Rostro",
     price: 900,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.766836007795388.jpg"
   },
   {
@@ -58,8 +46,6 @@ const PRODUCTS = [
     name: "Toallitas Limpiagafas Bosque Verde monodosis perfumadas 32und",
     category: "Otros",
     price: 450,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.9901194809376783.jpg"
   },
   {
@@ -67,8 +53,6 @@ const PRODUCTS = [
     name: "Desodorante para pies fresh & dry Deliplus antitranspirante spray 150 ml",
     category: "Otros",
     price: 400,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7412669567328445.jpg"
   },
   {
@@ -76,8 +60,6 @@ const PRODUCTS = [
     name: "Deliplus Gel higiene intimo liquido hidratante con dosificador 500 ml",
     category: "Higiene íntima",
     price: 500,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7787574431351961.jpg"
   },
   {
@@ -85,8 +67,6 @@ const PRODUCTS = [
     name: "Exfoliante corporal mineral Deliplus Mar Muerto 400 ml",
     category: "Cuerpo",
     price: 650,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.964762992512799.jpg"
   },
   {
@@ -94,8 +74,6 @@ const PRODUCTS = [
     name: "Exfoliante corporal marino Deliplus Sal Mar Muerto 400 g",
     category: "Cuerpo",
     price: 650,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.3357927369198168.jpg"
   },
   {
@@ -103,8 +81,6 @@ const PRODUCTS = [
     name: "Gel de baño tiernos recuerdos Deliplus piel normal 750 ml",
     category: "Cuerpo",
     price: 350,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7576058214157932.jpg"
   },
   {
@@ -112,8 +88,6 @@ const PRODUCTS = [
     name: "Exfoliante Arcilla Blanca Facial Clean Deliplus piel normal o mixta 100 ml",
     category: "Rostro",
     price: 600,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.9089123499909787.jpg"
   },
   {
@@ -121,8 +95,6 @@ const PRODUCTS = [
     name: "Colágeno soluble sabor limón Colagen complemento alimenticio Deliplus 250 g",
     category: "Suplementos",
     price: 900,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7143289581985477.jpg"
   },
   {
@@ -130,8 +102,6 @@ const PRODUCTS = [
     name: "Crema protección solar infantil FPS 50+ Deliplus para pieles sensibles y atópicas",
     category: "Rostro",
     price: 650,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8439793539752637.jpg"
   },
   {
@@ -139,8 +109,6 @@ const PRODUCTS = [
     name: "Gel refrescante mentol Deliplus para pies y piernas 300 ml",
     category: "Cuerpo",
     price: 550,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.13998940319484232.jpg"
   },
   {
@@ -148,8 +116,6 @@ const PRODUCTS = [
     name: "Loción corporal Calm Deliplus omega 3, 6, 9 y niacinamida piel sensible y atópica 400 ml",
     category: "Cuerpo",
     price: 450,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8733127834132417.jpg"
   },
   {
@@ -157,8 +123,6 @@ const PRODUCTS = [
     name: "Loción corporal Repara Deliplus urea 10% y dexpantenol piel muy seca 400 ml",
     category: "Cuerpo",
     price: 450,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.6565286896440724.jpg"
   },
   {
@@ -166,8 +130,6 @@ const PRODUCTS = [
     name: "Loción corporal Hidrata Deliplus aloe vera y ácido hialurónico piel normal 600 g",
     category: "Cuerpo",
     price: 550,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.4615014729316803.jpg"
   },
   {
@@ -175,8 +137,6 @@ const PRODUCTS = [
     name: "Crema corporal Nivea 250 ml",
     category: "Cuerpo",
     price: 600,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8937379278968904.jpg"
   },
   {
@@ -184,8 +144,6 @@ const PRODUCTS = [
     name: "Gel facial limpiador Facial clean todo tipo de piel Deliplus 250 ml",
     category: "Rostro",
     price: 500,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.14096114588484898.jpg"
   },
   {
@@ -193,8 +151,6 @@ const PRODUCTS = [
     name: "Gel de baño frutal Deliplus piel normal 750 ml",
     category: "Cuerpo",
     price: 350,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.6750012951424128.jpg"
   },
   {
@@ -202,8 +158,6 @@ const PRODUCTS = [
     name: "Crema de manos hidratante con aloe vera Deliplus 75 ml",
     category: "Cuerpo",
     price: 350,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7971261774222368.jpg"
   },
   {
@@ -211,8 +165,6 @@ const PRODUCTS = [
     name: "Comprimidos efervescentes vitamina C y zinc Deliplus sabor limón 20und/80g",
     category: "Suplementos",
     price: 400,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7343292665638652.jpg"
   },
   {
@@ -220,8 +172,6 @@ const PRODUCTS = [
     name: "Gel de baño vainilla y miel Deliplus piel normal 750 ml",
     category: "Cuerpo",
     price: 350,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.9119627229156263.jpg"
   },
   {
@@ -229,8 +179,6 @@ const PRODUCTS = [
     name: "Concentrado manual Florena con manteca de karité y aceite de argán 50 ml",
     category: "Cuerpo",
     price: 250,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7890441674096778.jpg"
   },
   {
@@ -238,8 +186,6 @@ const PRODUCTS = [
     name: "Serum Facial Potenciador Sisbela Reafirm Deliplus 12% silicio tipo pieles frasco",
     category: "Rostro",
     price: 950,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8420422814402666.jpg"
   },
   {
@@ -247,8 +193,6 @@ const PRODUCTS = [
     name: "Crema depilatoria mujer para el cuerpo Deliplus piel sensible bajo la ducha incluye manopla 200 ml",
     category: "Cuerpo",
     price: 500,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7471298043382055.jpg"
   },
   {
@@ -256,8 +200,6 @@ const PRODUCTS = [
     name: "Sérum facial Ácido Hialurónico y Ceramidas Deliplus Hidrata todo tipo de piel 30 ml ",
     category: "Rostro",
     price: 800,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/1767924116543-0.399580346122166.jpg"
   },
   {
@@ -265,8 +207,6 @@ const PRODUCTS = [
     name: "Gel de baño granada y frutos silvestres Deliplus piel normal 750 ml",
     category: "Cuerpo",
     price: 350,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8889156108119076.jpg"
   },
   {
@@ -274,8 +214,6 @@ const PRODUCTS = [
     name: "Gel corporal aloe vera Deliplus 400 ml",
     category: "Cuerpo",
     price: 600,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.07272257840533858.jpg"
   },
   {
@@ -283,8 +221,6 @@ const PRODUCTS = [
     name: "Deliplus Gel de higiene íntimo líquido con dosificador 500 ml",
     category: "Higiene íntima",
     price: 500,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7470060378444082.jpg"
   },
   {
@@ -292,8 +228,6 @@ const PRODUCTS = [
     name: "Crema de manos nutritiva Karité Deliplus 75 ml",
     category: "Cuerpo",
     price: 350,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.013811606548578825.jpg"
   },
   {
@@ -301,8 +235,6 @@ const PRODUCTS = [
     name: "Loción corporal Nutre Deliplus almendras y cica piel seca 600 g",
     category: "Cuerpo",
     price: 550,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.1886844553433108.jpg"
   },
   {
@@ -310,8 +242,6 @@ const PRODUCTS = [
     name: "Crema protección solar Deliplus FPS 50+ Resistente al agua 100 ml",
     category: "Cuerpo",
     price: 600,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.6036945328427022.jpg"
   },
   {
@@ -319,8 +249,6 @@ const PRODUCTS = [
     name: "Gel de baño avena Deliplus piel sensible 750 ml",
     category: "Cuerpo",
     price: 350,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.10264727845100174.jpg"
   },
   {
@@ -328,8 +256,6 @@ const PRODUCTS = [
     name: "Gel de baño frescor azul Deliplus piel normal 750 ml",
     category: "Cuerpo",
     price: 350,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.44323230998298535.jpg"
   },
   {
@@ -337,8 +263,6 @@ const PRODUCTS = [
     name: "Gel de baño marino y cedro Deliplus piel normal 750 ml",
     category: "Cuerpo",
     price: 350,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.38823628813402555.jpg"
   },
   {
@@ -346,8 +270,6 @@ const PRODUCTS = [
     name: "Crema facial noche Deliplus aclarante anti-manchas todo tipo de piel 50 ml",
     category: "Rostro",
     price: 900,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.1687269797256935.jpg"
   },
   {
@@ -355,8 +277,6 @@ const PRODUCTS = [
     name: "Protector Labial Deliplus FPS 15 1und",
     category: "Rostro",
     price: 350,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.26585338094003164.jpg"
   },
   {
@@ -364,8 +284,6 @@ const PRODUCTS = [
     name: "Crema depilatoria hombre Deliplus piel normal bajo la ducha incluye manopla 200 ml",
     category: "Cuerpo",
     price: 500,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8309128377524708.jpg"
   },
   {
@@ -373,8 +291,6 @@ const PRODUCTS = [
     name: "Gel de baño 10% urea Deliplus piel áspera y deshidratada 500 ml",
     category: "Cuerpo",
     price: 400,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.47965691702378466.jpg"
   },
   {
@@ -382,8 +298,6 @@ const PRODUCTS = [
     name: "Manteca corporal Murumuru Deliplus 300 ml ",
     category: "Cuerpo",
     price: 550,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.17408592890249042.jpg"
   },
   {
@@ -391,8 +305,6 @@ const PRODUCTS = [
     name: "Leche facial limpiadora Facial Clean todo tipo de piel Deliplus 250 ml",
     category: "Rostro",
     price: 450,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.6289164249460402.jpg"
   },
   {
@@ -400,8 +312,6 @@ const PRODUCTS = [
     name: "Crema solar SPF 50+ en formato spray",
     category: "Cuerpo",
     price: 900,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.890999533523696.jpg"
   },
   {
@@ -409,8 +319,6 @@ const PRODUCTS = [
     name: "Deliplus Crema corporal aceite argan 250 ml",
     category: "Cuerpo",
     price: 450,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.05540865085271529.jpg"
   },
   {
@@ -418,8 +326,6 @@ const PRODUCTS = [
     name: "Desodorante piedra de alumbre mineral Deonat para todo tipo de piel 60 g",
     category: "Otros",
     price: 400,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.9331449890013408.jpg"
   },
   {
@@ -427,8 +333,6 @@ const PRODUCTS = [
     name: "Deliplus Crema corporal aceite oliva 250 ml",
     category: "Cuerpo",
     price: 450,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.792738396021052.jpg"
   },
   {
@@ -436,8 +340,6 @@ const PRODUCTS = [
     name: "Gel de baño ambar y vetiver Deliplus piel normal 750 ml",
     category: "Cuerpo",
     price: 350,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.29018513988843364.jpg"
   },
   {
@@ -445,8 +347,6 @@ const PRODUCTS = [
     name: "Deliplus Exfoliante corporal con coco 250 ml",
     category: "Cuerpo",
     price: 650,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.6693914752431569.jpg"
   },
   {
@@ -454,8 +354,6 @@ const PRODUCTS = [
     name: "Gel de baño argán Deliplus piel muy seca 500 ml",
     category: "Cuerpo",
     price: 400,
-    in_stock: 1,
-    popular: 0,
     image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.3166909672180076.jpg"
   }
 ];
