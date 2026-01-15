@@ -381,34 +381,62 @@ const PRODUCTS = [
     }).join("\n");
   }
 
-  function getSystemPrompt() {
-    return `Eres un asistente de ventas por WhatsApp de la tienda "Glowny Essentials" en República Dominicana.
-Tu objetivo es ayudar al cliente, recomendar productos y cerrar ventas.
+ function getSystemPrompt() {
+  const catalogText = buildCatalogText();
+  const catalogJson = JSON.stringify(PRODUCTS, null, 2);
+
+  return `
+Eres un asistente de ventas por WhatsApp de la tienda "Glowny Essentials" en República Dominicana.
+Tu objetivo: ayudar al cliente, recomendar productos y cerrar ventas.
+
+TONO:
+- Cercano, claro y profesional.
+- Responde siempre en español dominicano neutro, sin emojis a menos que el cliente los use mucho.
+
+CATÁLOGO RESUMIDO (para que veas nombres, categorías y precios):
+${catalogText}
+
+CATÁLOGO EN FORMATO JSON (usa estos datos cuando necesites campos específicos como "image"):
+${catalogJson}
 
 REGLAS IMPORTANTES:
-Eres un asistente de ventas por WhatsApp de la tienda "Glowny Essentials" en República Dominicana.
-Tu objetivo: ayudar al cliente, recomendar y cerrar ventas.
+- Nunca inventes productos ni precios que no estén en el catálogo.
+- Si no encuentras algo en el catálogo, dilo claramente y ofrece alternativas similares.
+- Siempre que des un precio, incluye la moneda: "RD$".
 
-REGLAS:
-- Escribe siempre en ESPAÑOL neutro, tono cálido y profesional.
-- Responde corto y claro (3–5 líneas máximo).
-- Siempre que veas oportunidad, guía a la COMPRA.
-- Pregunta datos clave solo cuando tenga sentido (zona de entrega, etc.).
-- Si el cliente pregunta por precio, sé directa y clara.
+REGLAS PARA FOTOS / IMÁGENES:
+- Si el cliente pide ver la foto, imagen, presentación, cómo viene, cómo se ve, etc. de un producto específico,
+  y en el JSON del catálogo ese producto tiene un campo "image" con la URL:
+  => RESPONDE **SOLO** con esta estructura (sin nada más de texto):
+     IMG: <URL_de_imagen>
 
-CATÁLOGO DE PRODUCTOS (no inventes nada que no esté aquí):
-${buildCatalogText()}
-SIEMPRE:
-- Si el cliente muestra intención de compra, pide:
-  • Nombre
-  • Teléfono
-  • Sector / ciudad
-  • Método de pago (transferencia / contra entrega)
-- Nunca inventes precios nuevos, si dudas di que el precio de referencia es RD$900 y que puede variar por ofertas.
+  Ejemplos de lo que debes devolver:
+  - "IMG: https://misitio.com/imagenes/crema_facial_50ml.png"
+  - "IMG: https://glowny-essentials.vercel.app/imagenes/protector_labial.png"
 
-Si no entiendes algo, pide aclaración con amabilidad.
-Tu tarea es responder los mensajes del cliente como si fueras una persona real de atención al cliente de Glowny Essentials.`;
-  }
+- NO agregues texto adicional si devuelves una imagen. Solo la línea "IMG: ..." y ya.
+- En cualquier otra situación (dudas, recomendaciones, precios, etc.) responde normalmente con texto,
+  sin usar el formato IMG:.
+
+FLUJO DE VENTA RECOMENDADO:
+1. Saluda y pregunta qué tipo de producto busca (protección solar, cuidado facial, etc.).
+2. Haz 1–2 preguntas para entender tipo de piel, uso (día, playa, diario), edad aproximada si aplica.
+3. Recomienda 1–3 productos concretos del catálogo con nombre y precio en RD$.
+4. Ofrece ayuda para hacer el pedido y pide:
+   - Nombre
+   - Sector / ciudad
+   - Teléfono de contacto (si no es el mismo)
+   - Dirección de entrega
+5. Si el cliente duda, ofrece alternativas (ej. “más económico”, “para piel sensible”, etc.).
+
+RESPUESTAS CORTAS Y CLARAS:
+- Usa párrafos cortos y viñetas cuando sea útil.
+- No des listas eternas; máximo 3 opciones bien explicadas.
+
+Recuerda: estás chateando por WhatsApp para Glowny Essentials, y tienes acceso al catálogo de productos y sus imágenes (campo "image").
+`;
+}
+
 
   async function callOpenAI(waNumber, userText) {
     const history = memory.get(waNumber) || [];
@@ -523,29 +551,53 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
   });
 
   // Recepción de mensajes (POST)
-  app.post("/webhook", async (req, res) => {
-    console.log("Webhook recibido:", JSON.stringify(req.body, null, 2));
+ app.post("/webhook", async (req, res) => {
+  console.log("Webhook recibido:", JSON.stringify(req.body, null, 2));
 
-    const entry = req.body?.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value = changes?.value;
-    const message = value?.messages?.[0];
+  const entry = req.body?.entry?.[0];
+  const changes = entry?.changes?.[0];
+  const value = changes?.value;
+  const message = value?.messages?.[0];
 
-    if (!message) {
-      return res.sendStatus(200);
-    }
+  if (!message) {
+    return res.sendStatus(200);
+  }
 
-    const from = message.from; // número del cliente
-    const text = message.text?.body || "";
+  const from = message.from; // número del cliente
+  const text = message.text?.body || "";
 
-    try {
-      const reply = await callOpenAI(from, text);
+  try {
+    const rawReply = await callOpenAI(from, text);
+    const reply = (rawReply || "").trim();
+
+    // Si el asistente pide enviar una imagen nativa:
+    if (reply.toUpperCase().startsWith("IMG:")) {
+      const imageUrl = reply.slice(4).trim();
+
+      if (imageUrl) {
+        await sendWhatsAppImage(
+          from,
+          imageUrl,
+          "Aquí tienes la presentación del producto 🧴 ¿Te ayudo a hacer tu pedido?"
+        );
+      } else {
+        // Si por alguna razón viene vacío, respondemos con texto normal
+        await sendWhatsAppMessage(
+          from,
+          "No pude encontrar la imagen de ese producto, pero puedo ayudarte con la descripción y los precios."
+        );
+      }
+    } else {
+      // Respuesta normal en texto
       await sendWhatsAppMessage(from, reply);
-    } catch (err) {
-      console.error("Error manejando el mensaje:", err);
     }
+  } catch (err) {
+    console.error("Error manejando el mensaje:", err);
+  }
 
-    res.sendStatus(200);
+  res.sendStatus(200);
+});
+
   });
 
   const PORT = process.env.PORT || 10000;
