@@ -605,61 +605,59 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
     return res.sendStatus(403);
   });
 
-  // Recepción de mensajes (POST)
- app.post("/webhook", async (req, res) => {
+  
+ // Recepción de mensajes (POST)
+app.post("/webhook", async (req, res) => {
   console.log("Webhook recibido:", JSON.stringify(req.body, null, 2));
 
-  const entry = req.body?.entry?.[0];
-  const changes = entry?.changes?.[0];
-  const value = changes?.value;
-  const message = value?.messages?.[0];
-
-     const from = message.from; // número del cliente (ya lo usas)
-  let userText = "";
-
-  // 🔹 Si viene de anuncio o tiene referral, guardamos el contexto
-  if (message.referral) {
-    const ref = message.referral;
-    const posibleNombre =
-      ref.headline ||
-      ref.body ||
-      ref.source_url ||
-      "";
-
-    if (posibleNombre) {
-      console.log("➡️ Referral detectado para", from, "=>", posibleNombre);
-      entryProduct.set(from, posibleNombre);
-    }
-  }
-
-
-  if (!message) {
-    return res.sendStatus(200);
-  }
-
-  // 🔹 Si el cliente envía ubicación por el mapa
-  if (message.type === "location" && message.location) {
-    const loc = message.location;
-
-    // Guardamos la última ubicación de este cliente
-    lastLocation.set(from, {
-      latitude: loc.latitude,
-      longitude: loc.longitude,
-      name: loc.name || "",
-      address: loc.address || ""
-    });
-
-    // Texto que verá el modelo (para que sepa que ya tiene ubicación)
-    userText =
-      "Te acabo de enviar mi ubicación por el mapa de WhatsApp 📍. " +
-      (loc.address ? `La dirección que muestra el mapa es: ${loc.address}.` : "");
-
-  } else {
-    // Mensaje normal de texto
-    userText = message.text?.body || "";
-  }
-
   try {
+    const entry = req.body?.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const value = changes?.value;
+
+    // ⚠️ A veces NO viene messages (statuses, etc.)
+    const message = value?.messages?.[0];
+    if (!message) {
+      return res.sendStatus(200);
+    }
+
+    const from = message.from; // ✅ ahora sí es seguro
+    let userText = "";
+
+    // 🔹 Si viene de anuncio o tiene referral, guardamos el contexto
+    if (message.referral) {
+      const ref = message.referral;
+      const posibleNombre =
+        ref.headline ||
+        ref.body ||
+        ref.source_url ||
+        "";
+
+      if (posibleNombre) {
+        console.log("➡️ Referral detectado para", from, "=>", posibleNombre);
+        entryProduct.set(from, posibleNombre);
+      }
+    }
+
+    // 🔹 Si el cliente envía ubicación por el mapa
+    if (message.type === "location" && message.location) {
+      const loc = message.location;
+
+      lastLocation.set(from, {
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        name: loc.name || "",
+        address: loc.address || ""
+      });
+
+      userText =
+        "Te acabo de enviar mi ubicación por el mapa de WhatsApp 📍. " +
+        (loc.address ? `La dirección que muestra el mapa es: ${loc.address}.` : "");
+    } else {
+      // Mensaje normal de texto
+      userText = message.text?.body || "";
+    }
+
     const rawReply = (await callOpenAI(from, userText)) || "";
     let reply = rawReply.trim();
 
@@ -681,22 +679,21 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
           "No pude encontrar la imagen de ese producto, pero puedo ayudarte con la descripción y los precios."
         );
       }
+
     } else {
       // 2) ¿Incluye bloque de PEDIDO_CONFIRMADO?
       let orderInfo = null;
 
       if (reply.includes(ORDER_TAG)) {
         const parts = reply.split(ORDER_TAG);
-        reply = parts[0].trim();          // Lo que verá el cliente
-        orderInfo = parts[1].trim();      // Resumen en JSON generado por el modelo
+        reply = parts[0].trim();
+        orderInfo = parts[1].trim();
       }
 
-      // Enviar mensaje al cliente (si hay texto)
       if (reply) {
         await sendWhatsAppMessage(from, reply);
       }
 
-      // Si hay un pedido confirmado, reenviarlo al número administrador
       if (orderInfo) {
         let adminText =
           "📦 NUEVO PEDIDO CONFIRMADO - Glowny Essentials\n\n" +
@@ -705,7 +702,6 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
           `Número del cliente (WhatsApp): ${from}\n` +
           `Enlace al chat: https://wa.me/${from}`;
 
-        // 🔹 Si tenemos ubicación en mapa guardada, la añadimos al mensaje
         const loc = lastLocation.get(from);
         if (loc) {
           adminText +=
@@ -720,12 +716,14 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
         console.log("✅ Pedido reenviado al administrador con ubicación (si estaba disponible)");
       }
     }
-  } catch (err) {
-    console.error("Error manejando el mensaje:", err);
-  }
 
-  res.sendStatus(200);
+    return res.sendStatus(200);
+  } catch (err) {
+    console.error("Error en /webhook:", err);
+    return res.sendStatus(200); // Meta siempre quiere 200 para no reintentar infinito
+  }
 });
+
 
 
 
