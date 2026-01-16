@@ -1,560 +1,292 @@
-  const express = require("express");
-  const fetch = (...args) =>
-    import("node-fetch").then(({ default: fetch }) => fetch(...args));
+const express = require("express");
+const fetch = (...args) =>
+  import("node-fetch").then(({ default: fetch }) => fetch(...args));
 
-  const app = express();
-  app.use(express.json());
+const app = express();
+app.use(express.json());
 
-  const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "glowny_verify";
-  const WA_TOKEN = process.env.WA_TOKEN;
-  const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-  const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-// Número de WhatsApp donde quieres recibir los pedidos ya listos (sin +, solo dígitos)
-const ADMIN_PHONE = "18492010239"; // EJEMPLO: "18295828578"
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "glowny_verify";
+const WA_TOKEN = process.env.WA_TOKEN;
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+// ✅ ADMIN (recibe pedidos listos)
+const ADMIN_PHONE = "18492010239"; // sin +
+// Si quieres mandar datos bancarios cuando elijan transferencia:
+const BANK_INFO =
+  process.env.BANK_INFO ||
+  "✅ Transferencia disponible. Te paso los datos al confirmar 💖";
+
+// TAG para pedidos confirmados por IA (fallback)
 const ORDER_TAG = "PEDIDO_CONFIRMADO:";
-// Para guardar la última ubicación enviada por cada cliente
-const lastLocation = new Map(); // key: waNumber, value: { latitude, longitude, name, address }
 
+// ✅ IDs de botones (PRO 2)
+const BTN_CONFIRM = "confirm_order";
+const BTN_ADD_MORE = "add_more";
+const BTN_CANCEL = "cancel_order";
 
-  // Memoria simple por número de WhatsApp
-  const memory = new Map(); // key: waNumber -> [{ role, content }]
-// Producto por el que llegó el cliente desde anuncio / referral
-const entryProduct = new Map(); // key: waNumber, value: texto del anuncio/producto
+const BTN_PAY_TRANSFER = "pay_transfer";
+const BTN_PAY_CASH = "pay_cash";
 
-  function buildCatalogText() {
-    return PRODUCTS.map((p) => {
-      const price = p.price ? `RD$${p.price}` : "";
-      const cat = p.category ? `[${p.category}] ` : "";
-      return `- ${cat}${p.name}${price ? " — " + price : ""}`;
-    }).join("\n");
+const BTN_TIME_TODAY = "time_today";
+const BTN_TIME_TOMORROW = "time_tomorrow";
+const BTN_TIME_COORD = "time_coord";
+
+// ✅ Memorias y estados
+const lastLocation = new Map(); // from -> {latitude,longitude,name,address}
+const memory = new Map(); // from -> openai history
+const entryProduct = new Map(); // from -> texto del anuncio/referral
+const currentProduct = new Map(); // from -> productId (producto principal detectado)
+const carts = new Map(); // from -> { items:[{id,qty}], data:{} }
+
+// ✅ Carga catálogo desde JSON (NO dentro del prompt)
+let PRODUCTS = [];
+try {
+  PRODUCTS = require("./products.json");
+  console.log(`✅ Productos cargados: ${PRODUCTS.length}`);
+} catch (e) {
+  console.log("⚠️ No existe products.json. PRODUCTS quedará vacío.");
+}
+
+// =========================
+// HELPERS
+// =========================
+function normalizeText(str = "") {
+  return str
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getProductById(id) {
+  return PRODUCTS.find((p) => p.id === id) || null;
+}
+
+function findBestProduct(queryText = "") {
+  const q = normalizeText(queryText);
+  if (!q || PRODUCTS.length === 0) return null;
+
+  let best = null;
+  let bestScore = 0;
+
+  for (const p of PRODUCTS) {
+    if (!p?.in_stock) continue;
+
+    const name = normalizeText(p.name || "");
+    if (!name) continue;
+
+    const words = q.split(" ");
+    let score = 0;
+
+    for (const w of words) {
+      if (w.length < 3) continue;
+      if (name.includes(w)) score += 1;
+    }
+
+    // bonus por keywords frecuentes
+    if (q.includes("rosa mosqueta") && name.includes("rosa mosqueta")) score += 6;
+    if (q.includes("colageno") && name.includes("colageno")) score += 6;
+    if (q.includes("protector") && name.includes("proteccion solar")) score += 4;
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = p;
+    }
   }
 
- function getSystemPrompt() {
+  return bestScore >= 2 ? best : null;
+}
+
+function getOrCreateCart(from) {
+  let cart = carts.get(from);
+  if (!cart) {
+    cart = { items: [], data: { step: "idle" } };
+    carts.set(from, cart);
+  }
+  return cart;
+}
+
+function addToCart(from, productId, qty = 1) {
+  const cart = getOrCreateCart(from);
+
+  const existing = cart.items.find((x) => x.id === productId);
+  if (existing) existing.qty += qty;
+  else cart.items.push({ id: productId, qty });
+
+  carts.set(from, cart);
+  return cart;
+}
+
+function calcCartTotal(cart) {
+  let total = 0;
+  for (const it of cart.items || []) {
+    const p = getProductById(it.id);
+    if (!p) continue;
+    total += Number(p.price || 0) * Number(it.qty || 1);
+  }
+  return total;
+}
+
+function buildCartSummary(from) {
+  const cart = carts.get(from);
+  if (!cart || !cart.items || cart.items.length === 0) return null;
+
+  let lines = [];
+  let total = 0;
+
+  for (const it of cart.items) {
+    const p = getProductById(it.id);
+    if (!p) continue;
+
+    const sub = Number(p.price || 0) * Number(it.qty || 1);
+    total += sub;
+
+    lines.push(`• ${it.qty}x ${p.name} — RD$${p.price}`);
+  }
+
+  return {
+    text:
+      `🧾 *Tu pedido:* \n${lines.join("\n")}\n\n` +
+      `💰 *Total:* RD$${total}\n\n` +
+      `¿Confirmamos para procesarlo? 💖`,
+    total,
+    lines,
+  };
+}
+
+function buildAdminSummary(from) {
+  const cart = carts.get(from);
+  if (!cart || !cart.items || cart.items.length === 0) return null;
+
+  let lines = [];
+  let total = 0;
+
+  for (const it of cart.items) {
+    const p = getProductById(it.id);
+    if (!p) continue;
+
+    total += Number(p.price || 0) * Number(it.qty || 1);
+    lines.push(`- ${it.qty}x ${p.name} (RD$${p.price})`);
+  }
+
+  const data = cart.data || {};
+
+  let text =
+    `📦 *PEDIDO LISTO - Glowny Essentials*\n\n` +
+    `${lines.join("\n")}\n\n` +
+    `💰 Total: RD$${total}\n` +
+    `👤 Cliente: ${data.name || "No indicado"}\n` +
+    `📍 Sector: ${data.sector || "No indicado"}\n` +
+    `🏠 Dirección: ${data.address || "No indicada"}\n` +
+    `💳 Pago: ${data.payment || "No indicado"}\n` +
+    `🕒 Entrega: ${data.delivery_time || "No indicado"}\n\n` +
+    `📲 Cliente (WA): ${from}\n` +
+    `🔗 Chat: https://wa.me/${from}`;
+
+  const loc = lastLocation.get(from);
+  if (loc) {
+    text +=
+      `\n\n📍 Ubicación por mapa:\n` +
+      `Lat: ${loc.latitude}, Lon: ${loc.longitude}\n` +
+      `Google Maps: https://www.google.com/maps?q=${loc.latitude},${loc.longitude}\n` +
+      (loc.address ? `Dirección aprox: ${loc.address}\n` : "");
+  }
+
+  return text;
+}
+
+// =========================
+// PROMPT OPENAI (fallback)
+// =========================
+function getSystemPromptMini(productContext = "") {
   return `
-Eres un asistente de ventas por WhatsApp de la tienda "Glowny Essentials" en República Dominicana.
+Eres una asistente de ventas por WhatsApp de Glowny Essentials (RD).
+Responde corto (máx 2-4 líneas), tono femenino y amable con emojis suaves.
+NUNCA inventes precios: solo usa el precio del CONTEXTO si existe.
+Tu objetivo es cerrar el pedido: producto + cantidad + ubicación + pago.
 
-Tu objetivo principal:
-- Entender rápido qué quiere el cliente.
-- Guiarlo a elegir producto(s) del catálogo.
-- Confirmar pedido con datos completos.
-- TODO con respuestas cortas y claras.
+${productContext ? "CONTEXTO_PRODUCTO:\n" + productContext : ""}
 
-==================== ESTILO DE RESPUESTA ====================
-- Responde en español dominicano neutro.
-- Frases cortas. Máximo 2–4 líneas por mensaje.
-- Evita párrafos largos, historias y explicaciones innecesarias.
-- Ve al punto: pregunta lo que falte para cerrar el pedido.
-- usa emojis que se entienda que es una mujer quien escribre
-
-==================== REGLAS DE PRECIOS (MUY IMPORTANTE) ====================
-- Los ÚNICOS precios válidos son los del CATÁLOGO incluido abajo.
-- NUNCA uses como precio lo que diga el cliente (ej. "me lo vi en 300", "ponlo en 500").
-- Si el cliente menciona un precio diferente, RESPONDE SIEMPRE con:
-  - El precio oficial del catálogo, bien claro.
-  - Una frase breve explicando que trabajas con los precios actualizados de Glowny Essentials.
-- Si un producto no aparece en el catálogo, di claramente:
-  - que no puedes confirmar el precio
-  - y ofrece alternativas que SÍ estén en catálogo.
-- Cuando confirmes productos, escribe SIEMPRE:
-  NOMBRE EXACTO DEL CATÁLOGO + PRECIO EXACTO, por ejemplo:
-  "1x Crema protección solar facial Deliplus FPS 50+ resistente al agua 50 ml — RD$700".
-
-==================== FLUJO DE CONVERSACIÓN ====================
-1) Primer mensaje del cliente
-   - Saluda MUY corto.
-   - Identifica rápido si:
-     a) pregunta por un producto específico
-     b) quiere ayuda para elegir
-     c) viene desde una promo (menciona colágeno, protector solar, rosa mosqueta, etc.)
-   - Responde en 1–2 líneas y termina con una pregunta para avanzar.
-
-2) Cuando quiere información de producto
-   - Usa SOLO datos coherentes con el catálogo.
-   - Da una descripción corta (1–2 líneas) + precio.
-   - Pregunta de una vez si quiere hacer pedido:
-     "¿Te gustaría que te lo reserve y armamos el pedido?"
-
-3) Cuando quiere hacer un pedido
-   - Confirma primero:
-     - Producto exacto
-     - Cantidad
-   - Luego pide datos del envío en este orden:
-     1. Nombre completo
-     2. Número de teléfono (si es diferente al WhatsApp)
-     3. Ciudad y sector
-     4. Dirección breve + punto de referencia
-     5. Método de pago (transferencia, efectivo contra entrega, etc.)
-   - Para la ubicación por mapa:
-     - Pide explícitamente: 
-       "Puedes enviarme tu ubicación desde el botón de clip/anexar en WhatsApp y eligiendo 'Ubicación'."
-
-4) Resumen y confirmación
-   - Haz un resumen muy corto:
-     - Lista de productos con cantidad y precio
-     - Costo total estimado (solo usando precios del catálogo)
-     - Forma de entrega (envío / recoger, según lo que hayan hablado)
-   - Pregunta:
-     "¿Confirmas que está todo correcto para procesar tu pedido?"
-
-5) Si el cliente todavía está dudando
-   - No presiones, pero ofrece 1–2 opciones:
-     - Otro producto complementario
-   - Mantén las respuestas cortas.
-
-==================== MANEJO DE ANUNCIOS / PROMOS ====================
-- Si el cliente menciona un producto que coincide con el catálogo 
-  (ej. "colágeno", "protector solar niños", "aceite de rosa mosqueta"):
-  - Asume que ese es el producto principal de interés.
-  - Enfoca tus respuestas primero en ese producto antes de sugerir otros.
-
-==================== CATÁLOGO DE PRODUCTOS ====================
-El catálogo viene en formato JSON debajo (nombre, categoría, uso, tipo de piel, tamaño, precio, url_imagen, etc.).
-Debes usarlo SIEMPRE como fuente de verdad para:
-- nombres
-- y sobre todo precios.
-
-Si el cliente pide algo que no está en este listado, dilo claramente y sugiere opciones similares del catálogo.
-
-(const PRODUCTS = [
-  {
-    id: "0333fadc-c608-4c6e-a8d4-67d7a3ed117e",
-    name: "Crema corporal hidratante Esferas VIT - E Deliplus con ácido hialurónico",
-    category: "Cuerpo",
-    price: 550,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.47356556525844695.jpg"
-  },
-  {
-    id: "0552881d-7395-4d9e-8d60-10e01a879e10",
-    name: "Comprimidos efervescentes magnesio Deliplus 300 mg sabor naranja vitaminas B1, B6 y B12 20und/80g",
-    category: "Suplementos",
-    price: 400,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.6344341855892877.jpg"
-  },
-  {
-    id: "0e290ffc-c710-40b8-8409-206466bc5217",
-    name: "Aceite corporal rosa mosqueta Deliplus 100% puro y natural 30 ml",
-    category: "Cuerpo",
-    price: 950,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.01851007574591812.jpg"
-  },
-  {
-    id: "0feaf32e-4201-4cbd-ac77-830486f9192c",
-    name: "Aceite corporal romero Botella 200 ml Deliplus",
-    category: "Cuerpo",
-    price: 550,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.36263807809930526.jpg"
-  },
-  {
-    id: "104666b4-2391-4ba9-be6b-68fa012f630e",
-    name: "Crema protección solar facial Deliplus FPS 50+ resistente al agua 50 ml",
-    category: "Rostro",
-    price: 700,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.07349553219793581.jpg"
-  },
-  {
-    id: "144c0a12-1549-4a07-b11e-84e16fcb9217",
-    name: "Crema facial protectora anti-manchas Deliplus FPS 50+ todo tipo de piel 50 ml",
-    category: "Rostro",
-    price: 900,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.766836007795388.jpg"
-  },
-  {
-    id: "2382b32e-952c-46a7-85f0-4716ecc8216e",
-    name: "Toallitas Limpiagafas Bosque Verde monodosis perfumadas 32und",
-    category: "Otros",
-    price: 450,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.9901194809376783.jpg"
-  },
-  {
-    id: "2816c73d-ec50-49f0-9311-848539849ae7",
-    name: "Desodorante para pies fresh & dry Deliplus antitranspirante spray 150 ml",
-    category: "Otros",
-    price: 400,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7412669567328445.jpg"
-  },
-  {
-    id: "2f57e03f-4d2e-4dc6-bd8a-13abda985333",
-    name: "Deliplus Gel higiene intimo liquido hidratante con dosificador 500 ml",
-    category: "Higiene íntima",
-    price: 500,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7787574431351961.jpg"
-  },
-  {
-    id: "363d9ce6-cde3-4e3d-b569-94be86fa0fb7",
-    name: "Exfoliante corporal mineral Deliplus Mar Muerto 400 ml",
-    category: "Cuerpo",
-    price: 650,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.964762992512799.jpg"
-  },
-  {
-    id: "38dac334-d123-4a85-bca1-b0c2e805a4e9",
-    name: "Exfoliante corporal marino Deliplus Sal Mar Muerto 400 g",
-    category: "Cuerpo",
-    price: 650,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.3357927369198168.jpg"
-  },
-  {
-    id: "45c3abbe-206d-4568-8810-8cb07c844fa4",
-    name: "Gel de baño tiernos recuerdos Deliplus piel normal 750 ml",
-    category: "Cuerpo",
-    price: 350,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7576058214157932.jpg"
-  },
-  {
-    id: "4f900df6-82b0-4ffc-a3f3-0a65731d8394",
-    name: "Exfoliante Arcilla Blanca Facial Clean Deliplus piel normal o mixta 100 ml",
-    category: "Rostro",
-    price: 600,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.9089123499909787.jpg"
-  },
-  {
-    id: "5161a1bf-a837-4d3f-a589-d1987aea4c91",
-    name: "Colágeno soluble sabor limón Colagen complemento alimenticio Deliplus 250 g",
-    category: "Suplementos",
-    price: 900,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7143289581985477.jpg"
-  },
-  {
-    id: "55e72417-24eb-4d69-9972-cca5fc3edf8a",
-    name: "Crema protección solar infantil FPS 50+ Deliplus para pieles sensibles y atópicas",
-    category: "Rostro",
-    price: 650,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8439793539752637.jpg"
-  },
-  {
-    id: "615f78c9-b15d-422e-9260-893132c135d8",
-    name: "Gel refrescante mentol Deliplus para pies y piernas 300 ml",
-    category: "Cuerpo",
-    price: 550,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.13998940319484232.jpg"
-  },
-  {
-    id: "61f74869-4dbe-4213-91e4-e79d08e9f008",
-    name: "Loción corporal Calm Deliplus omega 3, 6, 9 y niacinamida piel sensible y atópica 400 ml",
-    category: "Cuerpo",
-    price: 450,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8733127834132417.jpg"
-  },
-  {
-    id: "671e458a-fdcd-47b3-93d4-cd21af1005ab",
-    name: "Loción corporal Repara Deliplus urea 10% y dexpantenol piel muy seca 400 ml",
-    category: "Cuerpo",
-    price: 450,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.6565286896440724.jpg"
-  },
-  {
-    id: "6e5c316e-25b9-429c-ba79-c549f6d20423",
-    name: "Loción corporal Hidrata Deliplus aloe vera y ácido hialurónico piel normal 600 g",
-    category: "Cuerpo",
-    price: 550,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.4615014729316803.jpg"
-  },
-  {
-    id: "71dc99d1-e026-4aec-b116-e6c4e14638d5",
-    name: "Crema corporal Nivea 250 ml",
-    category: "Cuerpo",
-    price: 600,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8937379278968904.jpg"
-  },
-  {
-    id: "80b3d654-8381-4bad-b29c-6bbc3043c3d6",
-    name: "Gel facial limpiador Facial clean todo tipo de piel Deliplus 250 ml",
-    category: "Rostro",
-    price: 500,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.14096114588484898.jpg"
-  },
-  {
-    id: "88539069-1373-48ee-a1d1-31430869815a",
-    name: "Gel de baño frutal Deliplus piel normal 750 ml",
-    category: "Cuerpo",
-    price: 350,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.6750012951424128.jpg"
-  },
-  {
-    id: "8b6f913b-9eff-4233-96c5-d483b70f09a4",
-    name: "Crema de manos hidratante con aloe vera Deliplus 75 ml",
-    category: "Cuerpo",
-    price: 350,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7971261774222368.jpg"
-  },
-  {
-    id: "8eb7cdea-a920-489a-97ad-60f3ec58497a",
-    name: "Comprimidos efervescentes vitamina C y zinc Deliplus sabor limón 20und/80g",
-    category: "Suplementos",
-    price: 400,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7343292665638652.jpg"
-  },
-  {
-    id: "901ffafd-9ce6-48ec-8b14-87bd993a62ef",
-    name: "Gel de baño vainilla y miel Deliplus piel normal 750 ml",
-    category: "Cuerpo",
-    price: 350,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.9119627229156263.jpg"
-  },
-  {
-    id: "92d65ef0-475e-4b89-ae11-639fd51fb423",
-    name: "Concentrado manual Florena con manteca de karité y aceite de argán 50 ml",
-    category: "Cuerpo",
-    price: 250,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7890441674096778.jpg"
-  },
-  {
-    id: "a0f25ca3-e821-4075-87db-40d97372ee67",
-    name: "Serum Facial Potenciador Sisbela Reafirm Deliplus 12% silicio tipo pieles frasco",
-    category: "Rostro",
-    price: 950,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8420422814402666.jpg"
-  },
-  {
-    id: "a161e422-0196-435d-9755-0350ed8ac8c5",
-    name: "Crema depilatoria mujer para el cuerpo Deliplus piel sensible bajo la ducha incluye manopla 200 ml",
-    category: "Cuerpo",
-    price: 500,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7471298043382055.jpg"
-  },
-  {
-    id: "aeea794a-564d-49a9-9616-c6122315b423",
-    name: "Sérum facial Ácido Hialurónico y Ceramidas Deliplus Hidrata todo tipo de piel 30 ml ",
-    category: "Rostro",
-    price: 800,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/1767924116543-0.399580346122166.jpg"
-  },
-  {
-    id: "b031231b-ac2f-4555-8223-10f7d0cf413c",
-    name: "Gel de baño granada y frutos silvestres Deliplus piel normal 750 ml",
-    category: "Cuerpo",
-    price: 350,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8889156108119076.jpg"
-  },
-  {
-    id: "c0373445-7be4-49b1-bd3e-d20095d8a264",
-    name: "Gel corporal aloe vera Deliplus 400 ml",
-    category: "Cuerpo",
-    price: 600,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.07272257840533858.jpg"
-  },
-  {
-    id: "c1dfe6da-edca-49ec-88d3-48247ca8f7d8",
-    name: "Deliplus Gel de higiene íntimo líquido con dosificador 500 ml",
-    category: "Higiene íntima",
-    price: 500,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7470060378444082.jpg"
-  },
-  {
-    id: "c37f4b97-2ab7-45db-b79c-6fd7db2afd02",
-    name: "Crema de manos nutritiva Karité Deliplus 75 ml",
-    category: "Cuerpo",
-    price: 350,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.013811606548578825.jpg"
-  },
-  {
-    id: "c3c918b1-e179-4123-9dd1-e1597c447bab",
-    name: "Loción corporal Nutre Deliplus almendras y cica piel seca 600 g",
-    category: "Cuerpo",
-    price: 550,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.1886844553433108.jpg"
-  },
-  {
-    id: "c6e534e2-b54b-4d08-93f9-9d82569f297a",
-    name: "Crema protección solar Deliplus FPS 50+ Resistente al agua 100 ml",
-    category: "Cuerpo",
-    price: 600,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.6036945328427022.jpg"
-  },
-  {
-    id: "d56a63e7-687a-4282-8464-1e6f43e45283",
-    name: "Gel de baño avena Deliplus piel sensible 750 ml",
-    category: "Cuerpo",
-    price: 350,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.10264727845100174.jpg"
-  },
-  {
-    id: "d6791f25-c4ac-4669-8234-ffd0fc3b2f81",
-    name: "Gel de baño frescor azul Deliplus piel normal 750 ml",
-    category: "Cuerpo",
-    price: 350,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.44323230998298535.jpg"
-  },
-  {
-    id: "d695db2e-e466-4ce8-8778-38625b8ae129",
-    name: "Gel de baño marino y cedro Deliplus piel normal 750 ml",
-    category: "Cuerpo",
-    price: 350,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.38823628813402555.jpg"
-  },
-  {
-    id: "dbb208a2-31e2-4a58-9f09-04bb4dba8d18",
-    name: "Crema facial noche Deliplus aclarante anti-manchas todo tipo de piel 50 ml",
-    category: "Rostro",
-    price: 900,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.1687269797256935.jpg"
-  },
-  {
-    id: "e04590e5-aa64-49c2-8346-2ad8c712915b",
-    name: "Protector Labial Deliplus FPS 15 1und",
-    category: "Rostro",
-    price: 350,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.26585338094003164.jpg"
-  },
-  {
-    id: "e150c27a-c825-4390-b2b2-3c539c4ba4c7",
-    name: "Crema depilatoria hombre Deliplus piel normal bajo la ducha incluye manopla 200 ml",
-    category: "Cuerpo",
-    price: 500,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8309128377524708.jpg"
-  },
-  {
-    id: "e498fd92-e734-4227-9340-7ed097fd79d1",
-    name: "Gel de baño 10% urea Deliplus piel áspera y deshidratada 500 ml",
-    category: "Cuerpo",
-    price: 400,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.47965691702378466.jpg"
-  },
-  {
-    id: "e5504c4e-83f9-4937-b819-9419292da3c8",
-    name: "Manteca corporal Murumuru Deliplus 300 ml ",
-    category: "Cuerpo",
-    price: 550,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.17408592890249042.jpg"
-  },
-  {
-    id: "e69f2c20-3841-4af7-9a2e-cbbfec30bb80",
-    name: "Leche facial limpiadora Facial Clean todo tipo de piel Deliplus 250 ml",
-    category: "Rostro",
-    price: 450,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.6289164249460402.jpg"
-  },
-  {
-    id: "e72e17d0-38b8-4aa2-b66f-bd47fd807cb1",
-    name: "Crema solar SPF 50+ en formato spray",
-    category: "Cuerpo",
-    price: 900,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.890999533523696.jpg"
-  },
-  {
-    id: "e7589330-248e-4fd7-a645-3d27e924ad5a",
-    name: "Deliplus Crema corporal aceite argan 250 ml",
-    category: "Cuerpo",
-    price: 450,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.05540865085271529.jpg"
-  },
-  {
-    id: "e88b9703-973e-4b56-901f-0ef39c2e4fca",
-    name: "Desodorante piedra de alumbre mineral Deonat para todo tipo de piel 60 g",
-    category: "Otros",
-    price: 400,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.9331449890013408.jpg"
-  },
-  {
-    id: "ea3e8d68-fd4b-486b-98ac-2408fc05f855",
-    name: "Deliplus Crema corporal aceite oliva 250 ml",
-    category: "Cuerpo",
-    price: 450,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.792738396021052.jpg"
-  },
-  {
-    id: "f1ef9bad-471c-4edc-8436-5b0625f1eaba",
-    name: "Gel de baño ambar y vetiver Deliplus piel normal 750 ml",
-    category: "Cuerpo",
-    price: 350,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.29018513988843364.jpg"
-  },
-  {
-    id: "f7a9aed0-a940-4584-aaf5-807e24c34bd4",
-    name: "Deliplus Exfoliante corporal con coco 250 ml",
-    category: "Cuerpo",
-    price: 650,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.6693914752431569.jpg"
-  },
-  {
-    id: "fa1ac7aa-48e4-4c4b-97f2-0c7ce3f812a9",
-    name: "Gel de baño argán Deliplus piel muy seca 500 ml",
-    category: "Cuerpo",
-    price: 400,
-    image: "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.3166909672180076.jpg"
-  }
-];)
+Si el cliente pide foto/presentación, responde: "Puedo enviarte la imagen ✅".
+Si el cliente confirma compra, pide: nombre, sector, dirección y ubicación por mapa.
 `;
 }
 
-
-
-
-
-  async function callOpenAI(waNumber, userText) {
-  const history = memory.get(waNumber) || [];
-
-  const baseSystem = getSystemPrompt();
-
-  // Contexto adicional si tenemos producto de entrada desde anuncio
-  const productFromAd = entryProduct.get(waNumber);
-  const extraSystem = productFromAd
-    ? `\n\nCONTEXTO DEL ANUNCIO:\nEl cliente llegó desde un anuncio o imagen relacionada con el producto: "${productFromAd}". Dale prioridad a ese producto en tus respuestas.`
-    : "";
+async function callOpenAI(from, userText, productContext = "") {
+  const history = memory.get(from) || [];
 
   const messages = [
-    { role: "system", content: baseSystem + extraSystem },
+    { role: "system", content: getSystemPromptMini(productContext) },
     ...history,
     { role: "user", content: userText },
   ];
 
-  // ... resto igual: llamada a OpenAI, actualizar memoria, etc.
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-4.1-mini",
+      messages,
+      temperature: 0.2,
+      max_tokens: 220,
+    }),
+  });
 
+  const data = await response.json();
 
-
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4.1-mini",
-        messages,
-        temperature: 0.4,
-      }),
-    });
-
-    const data = await response.json();
-    console.log("OpenAI raw response:", JSON.stringify(data, null, 2));
-
-    const reply =
-      data.choices?.[0]?.message?.content ||
-      "Disculpa, ahora mismo tengo un inconveniente para responder. ¿Puedes intentar de nuevo en unos minutos?";
-
-    // Actualizamos la memoria (dejamos máx 10 mensajes)
-    const newHistory = [...history, { role: "user", content: userText }, { role: "assistant", content: reply }];
-    memory.set(waNumber, newHistory.slice(-10));
-
-    return reply;
+  if (data?.error?.code === "rate_limit_exceeded") {
+    return "Ay mi amor 😭 ahora mismo estoy un chin ocupada. Escríbeme de nuevo en 1 minutico 🙏";
   }
 
-  async function sendWhatsAppMessage(to, text) {
-    const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
+  const reply =
+    data.choices?.[0]?.message?.content ||
+    "Disculpa mi amor 😅 ahora mismo tengo un inconveniente. Escríbeme de nuevo en un momento 💖";
 
-    const body = {
-      messaging_product: "whatsapp",
-      to,
-      type: "text",
-      text: { body: text },
-    };
+  // memoria corta
+  const newHistory = [
+    ...history,
+    { role: "user", content: userText },
+    { role: "assistant", content: reply },
+  ];
+  memory.set(from, newHistory.slice(-8));
 
-    console.log("Enviando mensaje a WhatsApp:", JSON.stringify(body, null, 2));
+  return reply;
+}
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${WA_TOKEN}`,
-      },
-      body: JSON.stringify(body),
-    });
+// =========================
+// WHATSAPP SENDERS
+// =========================
+async function sendWhatsAppMessage(to, text) {
+  const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
 
-    const data = await res.json();
-    console.log("Respuesta de WhatsApp:", JSON.stringify(data, null, 2));
+  const body = {
+    messaging_product: "whatsapp",
+    to,
+    type: "text",
+    text: { body: text },
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${WA_TOKEN}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    console.log("❌ Error WhatsApp:", JSON.stringify(data, null, 2));
   }
+}
 
-// NUEVO: enviar imagen nativa de WhatsApp
 async function sendWhatsAppImage(to, imageUrl, caption = "") {
   const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
 
@@ -563,12 +295,10 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
     to,
     type: "image",
     image: {
-      link: imageUrl,   // URL directa de la imagen (la que ya tienes en el catálogo)
-      caption,          // Texto que aparecerá debajo de la imagen
+      link: imageUrl,
+      caption,
     },
   };
-
-  console.log("Enviando IMAGEN a WhatsApp:", JSON.stringify(body, null, 2));
 
   const resp = await fetch(url, {
     method: "POST",
@@ -580,155 +310,334 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
   });
 
   const data = await resp.json();
-  console.log("Respuesta de WhatsApp (imagen):", JSON.stringify(data, null, 2));
-
   if (!resp.ok) {
-    throw new Error(
-      `Error enviando imagen a WhatsApp: ${resp.status} ${resp.statusText}`
-    );
+    console.log("❌ Error imagen WhatsApp:", JSON.stringify(data, null, 2));
   }
 }
 
+// ✅ Botones PRO 2
+async function sendWhatsAppButtons(to, text, buttons = []) {
+  const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
 
-  // Verificación del webhook (GET)
-  app.get("/webhook", (req, res) => {
-    const mode = req.query["hub.mode"];
-    const token = req.query["hub.verify_token"];
-    const challenge = req.query["hub.challenge"];
+  const body = {
+    messaging_product: "whatsapp",
+    to,
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: { text },
+      action: {
+        buttons: buttons.slice(0, 3).map((b) => ({
+          type: "reply",
+          reply: { id: b.id, title: b.title },
+        })),
+      },
+    },
+  };
 
-    if (mode === "subscribe" && token === VERIFY_TOKEN) {
-      console.log("Webhook verificado correctamente ✅");
-      return res.status(200).send(challenge);
-    }
-
-    console.log("Error al verificar webhook");
-    return res.sendStatus(403);
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${WA_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
   });
 
-  
- // Recepción de mensajes (POST)
-app.post("/webhook", async (req, res) => {
-  console.log("Webhook recibido:", JSON.stringify(req.body, null, 2));
+  const data = await resp.json();
+  if (!resp.ok) {
+    console.log("❌ Error botones WhatsApp:", JSON.stringify(data, null, 2));
+  }
+}
 
+// =========================
+// WEBHOOK GET
+// =========================
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    console.log("✅ Webhook verificado");
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
+});
+
+// =========================
+// WEBHOOK POST (PRO 2)
+// =========================
+app.post("/webhook", async (req, res) => {
   try {
     const entry = req.body?.entry?.[0];
     const changes = entry?.changes?.[0];
     const value = changes?.value;
 
-    // ⚠️ A veces NO viene messages (statuses, etc.)
     const message = value?.messages?.[0];
-    if (!message) {
-      return res.sendStatus(200);
-    }
+    if (!message) return res.sendStatus(200);
 
-    const from = message.from; // ✅ ahora sí es seguro
-    let userText = "";
+    const from = message.from;
+    const cart = getOrCreateCart(from);
 
-    // 🔹 Si viene de anuncio o tiene referral, guardamos el contexto
+    // ✅ Referral desde anuncio
     if (message.referral) {
       const ref = message.referral;
-      const posibleNombre =
-        ref.headline ||
-        ref.body ||
-        ref.source_url ||
-        "";
-
+      const posibleNombre = ref.headline || ref.body || ref.source_url || "";
       if (posibleNombre) {
-        console.log("➡️ Referral detectado para", from, "=>", posibleNombre);
         entryProduct.set(from, posibleNombre);
+        const p = findBestProduct(posibleNombre);
+        if (p) currentProduct.set(from, p.id);
       }
     }
 
-    // 🔹 Si el cliente envía ubicación por el mapa
+    // ✅ Ubicación por mapa
     if (message.type === "location" && message.location) {
       const loc = message.location;
-
       lastLocation.set(from, {
         latitude: loc.latitude,
         longitude: loc.longitude,
         name: loc.name || "",
-        address: loc.address || ""
+        address: loc.address || "",
       });
 
-      userText =
-        "Te acabo de enviar mi ubicación por el mapa de WhatsApp 📍. " +
-        (loc.address ? `La dirección que muestra el mapa es: ${loc.address}.` : "");
-    } else {
-      // Mensaje normal de texto
-      userText = message.text?.body || "";
+      await sendWhatsAppMessage(from, "Perfecto mi amor 📍 ya tengo tu ubicación. ¿Confirmamos el pedido? 💖");
+      return res.sendStatus(200);
     }
 
-    const rawReply = (await callOpenAI(from, userText)) || "";
-    let reply = rawReply.trim();
+    // ✅ Detectar botones
+    let interactiveId = null;
+    if (message.type === "interactive") {
+      const btn = message.interactive?.button_reply;
+      interactiveId = btn?.id || null;
+    }
 
-    console.log("Respuesta modelo:", reply);
+    // ✅ Texto
+    const userText = message.text?.body || "";
+    const userNorm = normalizeText(userText);
 
-    // 1) ¿Respuesta de imagen?  (IMG: <url>)
-    if (reply.toUpperCase().startsWith("IMG:")) {
-      const imageUrl = reply.slice(4).trim();
+    // =========================
+    // FLUJO BOTONES PRO 2
+    // =========================
+    if (interactiveId === BTN_CONFIRM) {
+      cart.data.step = "ask_payment";
+      carts.set(from, cart);
 
-      if (imageUrl) {
-        await sendWhatsAppImage(
-          from,
-          imageUrl,
-          "Aquí tienes la presentación del producto 🧴 ¿Te ayudo a completar tu pedido?"
-        );
+      await sendWhatsAppButtons(from, "Perfecto 💖 ¿Cómo deseas pagar?", [
+        { id: BTN_PAY_TRANSFER, title: "💳 Transferencia" },
+        { id: BTN_PAY_CASH, title: "💵 Efectivo" },
+      ]);
+      return res.sendStatus(200);
+    }
+
+    if (interactiveId === BTN_ADD_MORE) {
+      cart.data.step = "add_more";
+      carts.set(from, cart);
+      await sendWhatsAppMessage(from, "Dime cuál producto quieres agregar 😊");
+      return res.sendStatus(200);
+    }
+
+    if (interactiveId === BTN_CANCEL) {
+      carts.delete(from);
+      currentProduct.delete(from);
+      entryProduct.delete(from);
+      await sendWhatsAppMessage(from, "Listo mi amor ✅ pedido cancelado. Cuando quieras vuelves y te ayudo 💖");
+      return res.sendStatus(200);
+    }
+
+    if (interactiveId === BTN_PAY_TRANSFER || interactiveId === BTN_PAY_CASH) {
+      cart.data.payment =
+        interactiveId === BTN_PAY_TRANSFER ? "Transferencia" : "Efectivo contra entrega";
+
+      cart.data.step = "ask_delivery_time";
+      carts.set(from, cart);
+
+      if (interactiveId === BTN_PAY_TRANSFER) {
+        await sendWhatsAppMessage(from, BANK_INFO);
+      }
+
+      await sendWhatsAppButtons(from, "¿Para cuándo lo quieres? 🕒", [
+        { id: BTN_TIME_TODAY, title: "📦 Hoy" },
+        { id: BTN_TIME_TOMORROW, title: "📦 Mañana" },
+        { id: BTN_TIME_COORD, title: "📲 Coordinar" },
+      ]);
+      return res.sendStatus(200);
+    }
+
+    if (
+      interactiveId === BTN_TIME_TODAY ||
+      interactiveId === BTN_TIME_TOMORROW ||
+      interactiveId === BTN_TIME_COORD
+    ) {
+      cart.data.delivery_time =
+        interactiveId === BTN_TIME_TODAY
+          ? "Hoy"
+          : interactiveId === BTN_TIME_TOMORROW
+          ? "Mañana"
+          : "Coordinar";
+
+      cart.data.step = "ask_name";
+      carts.set(from, cart);
+
+      await sendWhatsAppMessage(from, "Perfecto mi amor 💖 ¿Cuál es tu nombre completo?");
+      return res.sendStatus(200);
+    }
+
+    // ✅ Captura nombre/sector/dirección
+    if (cart.data.step === "ask_name" && userText.trim().length > 2) {
+      cart.data.name = userText.trim();
+      cart.data.step = "ask_sector";
+      carts.set(from, cart);
+
+      await sendWhatsAppMessage(from, "¿En qué ciudad y sector estás? 📍");
+      return res.sendStatus(200);
+    }
+
+    if (cart.data.step === "ask_sector" && userText.trim().length > 2) {
+      cart.data.sector = userText.trim();
+      cart.data.step = "ask_address";
+      carts.set(from, cart);
+
+      await sendWhatsAppMessage(
+        from,
+        "Dime tu dirección breve y un punto de referencia 🏠\n(ó envíame tu ubicación por el mapa 📎→Ubicación)"
+      );
+      return res.sendStatus(200);
+    }
+
+    if (cart.data.step === "ask_address" && userText.trim().length > 2) {
+      cart.data.address = userText.trim();
+      cart.data.step = "ready_to_confirm";
+      carts.set(from, cart);
+
+      const summary = buildCartSummary(from);
+      if (summary) {
+        await sendWhatsAppButtons(from, summary.text, [
+          { id: BTN_CONFIRM, title: "✅ Confirmar" },
+          { id: BTN_ADD_MORE, title: "➕ Agregar" },
+          { id: BTN_CANCEL, title: "❌ Cancelar" },
+        ]);
       } else {
-        await sendWhatsAppMessage(
-          from,
-          "No pude encontrar la imagen de ese producto, pero puedo ayudarte con la descripción y los precios."
-        );
+        await sendWhatsAppMessage(from, "Dime qué producto deseas llevar y te lo agrego al pedido 💖");
       }
+      return res.sendStatus(200);
+    }
 
-    } else {
-      // 2) ¿Incluye bloque de PEDIDO_CONFIRMADO?
-      let orderInfo = null;
-
-      if (reply.includes(ORDER_TAG)) {
-        const parts = reply.split(ORDER_TAG);
-        reply = parts[0].trim();
-        orderInfo = parts[1].trim();
-      }
-
-      if (reply) {
-        await sendWhatsAppMessage(from, reply);
-      }
-
-      if (orderInfo) {
-        let adminText =
-          "📦 NUEVO PEDIDO CONFIRMADO - Glowny Essentials\n\n" +
-          orderInfo +
-          "\n\n" +
-          `Número del cliente (WhatsApp): ${from}\n` +
-          `Enlace al chat: https://wa.me/${from}`;
-
-        const loc = lastLocation.get(from);
-        if (loc) {
-          adminText +=
-            "\n\n📍 Ubicación enviada por mapa:\n" +
-            `Lat: ${loc.latitude}, Lon: ${loc.longitude}\n` +
-            `Google Maps: https://www.google.com/maps?q=${loc.latitude},${loc.longitude}\n` +
-            (loc.address ? `Dirección aproximada: ${loc.address}\n` : "") +
-            (loc.name ? `Nombre de ubicación: ${loc.name}\n` : "");
-        }
-
+    // ✅ Confirmación escrita ("si / confirmo / ok")
+    if (
+      cart.data.step === "ready_to_confirm" &&
+      (userNorm === "si" || userNorm.includes("confirmo") || userNorm.includes("ok"))
+    ) {
+      const adminText = buildAdminSummary(from);
+      if (adminText) {
+        await sendWhatsAppMessage(from, "✅ Listo mi amor 💖 ya procesé tu pedido. En breve te confirmamos el envío 📦✨");
         await sendWhatsAppMessage(ADMIN_PHONE, adminText);
-        console.log("✅ Pedido reenviado al administrador con ubicación (si estaba disponible)");
+
+        // limpieza
+        carts.delete(from);
+        currentProduct.delete(from);
+        entryProduct.delete(from);
+        memory.delete(from);
+
+        return res.sendStatus(200);
       }
     }
+
+    // =========================
+    // PRO: DETECTAR PRODUCTO (texto/referral)
+    // =========================
+    let product = null;
+    const currentId = currentProduct.get(from);
+    if (currentId) product = getProductById(currentId);
+
+    if (!product) {
+      // si entró por anuncio, intentamos con el texto del anuncio
+      const fromAd = entryProduct.get(from);
+      if (fromAd) product = findBestProduct(fromAd);
+    }
+
+    // si aún no hay producto, intentamos por el texto del usuario
+    if (!product) {
+      product = findBestProduct(userText);
+      if (product) currentProduct.set(from, product.id);
+    }
+
+    // =========================
+    // RESPUESTAS DIRECTAS (sin IA)
+    // =========================
+    const qtyMatch = userNorm.match(/\b(\d+)\b/);
+    const wantsBuy =
+      userNorm.includes("quiero") ||
+      userNorm.includes("dame") ||
+      userNorm.includes("lo llevo") ||
+      userNorm.includes("lo quiero") ||
+      userNorm.includes("ordenar") ||
+      userNorm.includes("comprar");
+
+    // precio directo
+    if (product && (userNorm.includes("precio") || userNorm.includes("cuanto") || userNorm.includes("cuesta"))) {
+      await sendWhatsAppMessage(from, `💰 ${product.name}\nPrecio: RD$${product.price}\n¿Lo quieres llevar? ¿Cuántos? 💖`);
+      return res.sendStatus(200);
+    }
+
+    // presentación/foto
+    if (product && (userNorm.includes("foto") || userNorm.includes("imagen") || userNorm.includes("presentacion"))) {
+      await sendWhatsAppImage(
+        from,
+        product.image,
+        `${product.name}\n💰 RD$${product.price}\n¿Lo quieres llevar? 💖`
+      );
+      return res.sendStatus(200);
+    }
+
+    // agregar al carrito
+    if (product && wantsBuy) {
+      const qty = qtyMatch ? parseInt(qtyMatch[1], 10) : 1;
+      addToCart(from, product.id, qty);
+
+      const summary = buildCartSummary(from);
+      await sendWhatsAppMessage(
+        from,
+        `✅ Perfecto mi amor 💖 agregué: ${qty}x ${product.name}\n💰 Precio: RD$${product.price}`
+      );
+
+      if (summary) {
+        await sendWhatsAppButtons(from, summary.text, [
+          { id: BTN_CONFIRM, title: "✅ Confirmar" },
+          { id: BTN_ADD_MORE, title: "➕ Agregar" },
+          { id: BTN_CANCEL, title: "❌ Cancelar" },
+        ]);
+      }
+      return res.sendStatus(200);
+    }
+
+    // si pide envío
+    if (userNorm.includes("envio") || userNorm.includes("llegar") || userNorm.includes("tarda")) {
+      await sendWhatsAppMessage(from, "📦 El envío suele tardar 24 a 48 horas según tu zona 💖\n¿En qué ciudad y sector estás?");
+      return res.sendStatus(200);
+    }
+
+    // =========================
+    // FALLBACK IA (solo si hace falta)
+    // =========================
+    const productContext = product
+      ? `Producto: ${product.name}\nPrecio: RD$${product.price}\nImagen: ${product.image}`
+      : "";
+
+    const aiReply = await callOpenAI(from, userText, productContext);
+    await sendWhatsAppMessage(from, aiReply);
 
     return res.sendStatus(200);
   } catch (err) {
     console.error("Error en /webhook:", err);
-    return res.sendStatus(200); // Meta siempre quiere 200 para no reintentar infinito
+    return res.sendStatus(200);
   }
 });
 
-
-
-
-
-  const PORT = process.env.PORT || 10000;
-  app.listen(PORT, () => {
-    console.log(`🚀 Bot corriendo en el puerto ${PORT}`);
-  });
+// =========================
+// SERVER
+// =========================
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`🚀 Bot corriendo en el puerto ${PORT}`);
+});
