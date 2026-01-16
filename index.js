@@ -637,9 +637,6 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
     return res.sendStatus(200);
   }
 
-  const from = message.from; // número del cliente
-  let userText = "";
-
   // 🔹 Si el cliente envía ubicación por el mapa
   if (message.type === "location" && message.location) {
     const loc = message.location;
