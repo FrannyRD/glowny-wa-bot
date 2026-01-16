@@ -423,6 +423,24 @@ function findBestProduct(text) {
   const q = normalizeText(text);
   if (!q) return null;
 
+  // ✅ Atajos por palabras clave (para frases cortas tipo “colageno normal”)
+  if (q.includes("colageno")) {
+    return PRODUCTS.find(p => normalizeText(p.name).includes("colageno")) || null;
+  }
+  if (q.includes("rosa mosqueta")) {
+    return PRODUCTS.find(p => normalizeText(p.name).includes("rosa mosqueta")) || null;
+  }
+  if (q.includes("protector solar infantil") || q.includes("protector solar ninos") || q.includes("protector solar niños")) {
+    return PRODUCTS.find(p => normalizeText(p.name).includes("infantil") && normalizeText(p.name).includes("fps 50")) || null;
+  }
+  if (q.includes("protector solar facial")) {
+    return PRODUCTS.find(p => normalizeText(p.name).includes("proteccion solar facial")) || null;
+  }
+  if (q.includes("magnesio")) {
+    return PRODUCTS.find(p => normalizeText(p.name).includes("magnesio")) || null;
+  }
+
+  // ✅ Match normal (pero más flexible)
   let best = null;
   let bestScore = 0;
 
@@ -443,9 +461,14 @@ function findBestProduct(text) {
     }
   }
 
-  if (bestScore >= 2) return best;
-  return null;
+  // ✅ Antes era >=2, ahora:
+  // Si la frase es corta (1-3 palabras) con 1 match ya sirve
+  const words = q.split(" ").filter(Boolean).length;
+  const minScore = words <= 3 ? 1 : 2;
+
+  return bestScore >= minScore ? best : null;
 }
+
 
 function isAskingForImage(text) {
   const q = normalizeText(text);
@@ -485,6 +508,8 @@ REGLA DE ORO (PRECIOS):
 - Solo existen los precios del catálogo interno.
 - Si el cliente dice otro precio: responde con el precio oficial (si tienes el producto detectado).
 - Si NO sabes cuál es el producto exacto: pide el nombre exacto o una foto.
+- Si NO tienes PRODUCTO DETECTADO, NO des precio. Pide nombre exacto.
+
 
 UBICACIÓN (MAPA):
 - Si falta ubicación: pide que la envíe con el clip 📎 > Ubicación > Enviar ubicación actual.
@@ -712,6 +737,30 @@ app.post("/webhook", async (req, res) => {
     // ✅ Guardar producto visto por texto
     const directProduct = findBestProduct(userText);
     if (directProduct) lastProductSeen.set(from, directProduct.id);
+
+    // ✅ PRO: Si detectamos producto y el cliente lo está pidiendo / preguntando, respondemos directo con catálogo
+if (directProduct) {
+  const q = normalizeText(userText);
+
+  const isRequest =
+    q.includes("necesito") ||
+    q.includes("quiero") ||
+    q.includes("dame") ||
+    q.includes("precio") ||
+    q.includes("cuanto cuesta") ||
+    q.includes("cuanto vale") ||
+    q.includes("cuánto cuesta") ||
+    q.includes("cuánto vale");
+
+  if (isRequest) {
+    await sendWhatsAppMessage(
+      from,
+      `Tengo este 💗\n${directProduct.name}\nPrecio: RD$${directProduct.price}\n¿Te reservo 1? 😊`
+    );
+    return res.sendStatus(200);
+  }
+}
+
 
     // ✅ Si el cliente pide imagen y tenemos producto detectado → mandarla directo
     if (isAskingForImage(userText)) {
