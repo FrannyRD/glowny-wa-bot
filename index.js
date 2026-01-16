@@ -10,6 +10,9 @@ const WA_TOKEN = process.env.WA_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
+// ✅ Puedes cambiar el modelo desde Render sin tocar código:
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-nano";
+
 // ✅ Número ADMIN donde recibes pedidos listos (sin +)
 const ADMIN_PHONE = "18492010239";
 
@@ -21,6 +24,25 @@ const memory = new Map(); // waNumber -> [{ role, content }]
 const entryProduct = new Map(); // waNumber -> texto producto de anuncio/referral
 const lastLocation = new Map(); // waNumber -> { latitude, longitude, name, address }
 const lastProductSeen = new Map(); // waNumber -> productId (último producto detectado)
+
+// ✅ PRO 2: evitar procesar el mismo mensaje 2 veces
+const processedMsgIds = new Map(); // msgId -> timestamp
+
+function alreadyProcessed(msgId) {
+  if (!msgId) return false;
+
+  const now = Date.now();
+  const ttl = 2 * 60 * 1000; // 2 minutos
+
+  // limpiar viejos
+  for (const [id, ts] of processedMsgIds.entries()) {
+    if (now - ts > ttl) processedMsgIds.delete(id);
+  }
+
+  if (processedMsgIds.has(msgId)) return true;
+  processedMsgIds.set(msgId, now);
+  return false;
+}
 
 // ======================================================
 // ✅ TU CATÁLOGO (JSON) - pegado aquí (del CSV)
@@ -397,19 +419,10 @@ function normalizeText(s) {
     .trim();
 }
 
-function buildCatalogText() {
-  // catálogo compacto (NO JSON dentro del prompt para evitar rate limit)
-  return PRODUCTS.map((p) => {
-    const cat = p.category ? `[${p.category}] ` : "";
-    return `- ${cat}${p.name} — RD$${p.price}`;
-  }).join("\n");
-}
-
 function findBestProduct(text) {
   const q = normalizeText(text);
   if (!q) return null;
 
-  // match simple por contains
   let best = null;
   let bestScore = 0;
 
@@ -417,10 +430,8 @@ function findBestProduct(text) {
     const name = normalizeText(p.name);
     let score = 0;
 
-    // exact contains
     if (name.includes(q) || q.includes(name)) score += 10;
 
-    // match por palabras
     const qWords = q.split(" ").filter(Boolean);
     const nameWords = new Set(name.split(" ").filter(Boolean));
     const hits = qWords.filter((w) => nameWords.has(w)).length;
@@ -432,7 +443,6 @@ function findBestProduct(text) {
     }
   }
 
-  // filtro mínimo para evitar matches raros
   if (bestScore >= 2) return best;
   return null;
 }
@@ -453,7 +463,7 @@ function isAskingForImage(text) {
 }
 
 // ======================================================
-// System Prompt (corto pero fuerte)
+// ✅ PRO 2: System Prompt (SIN catálogo completo)
 // ======================================================
 function getSystemPrompt() {
   return `
@@ -463,7 +473,7 @@ OBJETIVO:
 - Responder corto, claro y directo.
 - Identificar rápido qué quiere el cliente.
 - Confirmar pedido y pedir datos de envío.
-- NUNCA inventes precios. Solo usa el catálogo.
+- NUNCA inventes precios. Solo usa el precio del producto que se te provea como contexto.
 
 ESTILO:
 - Español dominicano neutro.
@@ -472,8 +482,9 @@ ESTILO:
 - Puedes usar pocos emojis femeninos (sin exagerar).
 
 REGLA DE ORO (PRECIOS):
-- Solo existen los precios del catálogo.
-- Si el cliente dice otro precio: responde con el precio oficial del catálogo.
+- Solo existen los precios del catálogo interno.
+- Si el cliente dice otro precio: responde con el precio oficial (si tienes el producto detectado).
+- Si NO sabes cuál es el producto exacto: pide el nombre exacto o una foto.
 
 UBICACIÓN (MAPA):
 - Si falta ubicación: pide que la envíe con el clip 📎 > Ubicación > Enviar ubicación actual.
@@ -482,38 +493,49 @@ PEDIDO CONFIRMADO:
 Cuando el cliente confirme, al final agrega:
 ${ORDER_TAG}
 {"cliente":"...","items":[{"name":"nombre exacto catálogo","qty":1}],"nota":"..."}
-
-CATÁLOGO (NOMBRE + PRECIO):
-${buildCatalogText()}
 `;
 }
 
 // ======================================================
-// OpenAI (con control de rate limit y menos tokens)
+// OpenAI (PRO 2: menos tokens + contexto del producto)
 // ======================================================
 async function callOpenAI(waNumber, userText) {
   const history = memory.get(waNumber) || [];
 
-  const baseSystem = getSystemPrompt();
-
-  // contexto si viene de anuncio / referral
+  // ✅ Contexto adicional si tenemos producto de entrada desde anuncio
   const productFromAd = entryProduct.get(waNumber);
   const extraSystem = productFromAd
-    ? `\nCONTEXTO ANUNCIO: El cliente llegó por: "${productFromAd}". Prioriza ese producto.`
+    ? `\nCONTEXTO ANUNCIO: El cliente llegó por: "${productFromAd}". Prioriza eso.`
     : "";
 
+  // ✅ PRO 2: Mandar SOLO el producto detectado (no el catálogo entero)
+  let productCtx = "";
+  const pid = lastProductSeen.get(waNumber);
+  if (pid) {
+    const p = PRODUCTS.find((x) => x.id === pid);
+    if (p) {
+      productCtx =
+        `\n\nPRODUCTO DETECTADO (CATÁLOGO OFICIAL):\n` +
+        `Nombre: ${p.name}\n` +
+        `Precio oficial: RD$${p.price}\n` +
+        (p.image ? `Imagen: ${p.image}\n` : "");
+    }
+  }
+
+  const baseSystem = getSystemPrompt();
+
   const messages = [
-    { role: "system", content: baseSystem + extraSystem },
+    { role: "system", content: baseSystem + extraSystem + productCtx },
     ...history,
     { role: "user", content: userText },
   ];
 
-  // 🔥 IMPORTANTE: baja tokens para evitar rate limit
+  // 🔥 PRO 2: menos consumo
   const payload = {
-    model: "gpt-4.1-mini",
+    model: OPENAI_MODEL,
     messages,
-    temperature: 0.2,
-    max_tokens: 250,
+    temperature: 0.1,
+    max_tokens: 160,
   };
 
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -531,10 +553,13 @@ async function callOpenAI(waNumber, userText) {
   if (!response.ok) {
     console.log("OpenAI raw response:", JSON.stringify(data, null, 2));
     const code = data?.error?.code || "";
+
+    // ✅ PRO 2: mensaje limpio (sin “ocupada”)
     const msg =
       code === "rate_limit_exceeded"
-        ? "Dame 5 segunditos 🙏 y me lo repites."
+        ? "Estoy procesando varios mensajes 🙏 Escríbeme de nuevo en 10 segunditos porfa."
         : "Ahora mismo tuve un error 😥 ¿Me lo repites?";
+
     return msg;
   }
 
@@ -542,13 +567,13 @@ async function callOpenAI(waNumber, userText) {
     data.choices?.[0]?.message?.content ||
     "Disculpa 😥 ¿Me lo repites?";
 
-  // ✅ Memoria corta (máx 6)
+  // ✅ PRO 2: Memoria más corta (menos tokens)
   const newHistory = [
     ...history,
     { role: "user", content: userText },
     { role: "assistant", content: reply },
   ];
-  memory.set(waNumber, newHistory.slice(-6));
+  memory.set(waNumber, newHistory.slice(-4));
 
   return reply;
 }
@@ -641,6 +666,13 @@ app.post("/webhook", async (req, res) => {
     // ⚠️ A veces NO viene messages (statuses, etc.)
     const message = value?.messages?.[0];
     if (!message) return res.sendStatus(200);
+
+    // ✅ PRO 2: evitar duplicados por message.id
+    const msgId = message.id;
+    if (alreadyProcessed(msgId)) {
+      console.log("🔁 Mensaje duplicado ignorado:", msgId);
+      return res.sendStatus(200);
+    }
 
     const from = message.from; // ✅ seguro
     let userText = "";
@@ -754,7 +786,6 @@ app.post("/webhook", async (req, res) => {
         if (parsed.nota) adminText += `\n📝 Nota: ${parsed.nota}\n`;
         if (parsed.cliente) adminText += `\n👤 Cliente: ${parsed.cliente}\n`;
       } else {
-        // Si no viene JSON bien, mandamos lo que vino crudo
         adminText += orderInfo + "\n";
       }
 
@@ -781,7 +812,7 @@ app.post("/webhook", async (req, res) => {
     return res.sendStatus(200);
   } catch (err) {
     console.error("Error en /webhook:", err);
-    return res.sendStatus(200); // Meta quiere 200
+    return res.sendStatus(200);
   }
 });
 
