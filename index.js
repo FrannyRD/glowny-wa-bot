@@ -600,7 +600,7 @@ async function callOpenAI(history, userText) {
   ];
 
   const payload = {
-    model: "gpt-4.1-mini", // ✅ Puedes cambiar a: "gpt-4.1-nano"
+    model: "gpt-4.1-nano", // ✅ Puedes cambiar a: "gpt-4.1-nano"
     messages,
     temperature: 0.2,
     max_tokens: 200,
