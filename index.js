@@ -22,7 +22,7 @@ const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 const ADMIN_PHONE = process.env.ADMIN_PHONE || "18492010239";
 
 const MODEL = process.env.OPENAI_MODEL || "gpt-4.1-nano";
-const MEMORY_TTL_SECONDS = 60 * 60 * 24;
+const MEMORY_TTL_SECONDS = 60 * 60 * 24; // 24h
 const MAX_HISTORY_MESSAGES = 10;
 
 // =============================
@@ -30,6 +30,7 @@ const MAX_HISTORY_MESSAGES = 10;
 // =============================
 let PRODUCTS = [];
 let productIndex = [];
+let categoryIndex = new Map(); // category -> products[]
 let CATALOG_OK = false;
 
 function normalizeText(s) {
@@ -53,7 +54,7 @@ function loadCatalogFromFile() {
   const data = JSON.parse(raw);
 
   if (!Array.isArray(data) || data.length === 0) {
-    console.log("❌ catalog.json invalido o vacio");
+    console.log("❌ catalog.json inválido o vacío");
     return [];
   }
 
@@ -69,16 +70,23 @@ function buildIndex() {
       ...p,
       normName,
       wordSet: new Set(words),
+      normCategory: normalizeText(p.category || ""),
     };
   });
+
+  categoryIndex = new Map();
+  for (const p of productIndex) {
+    const cat = p.normCategory || "otros";
+    if (!categoryIndex.has(cat)) categoryIndex.set(cat, []);
+    categoryIndex.get(cat).push(p);
+  }
 }
 
 function loadCatalog() {
   PRODUCTS = loadCatalogFromFile();
-  CATALOG_OK = PRODUCTS.length > 3;
+  CATALOG_OK = PRODUCTS.length > 0;
 
   if (!CATALOG_OK) {
-    // SIN catalogo -> NO dejamos que OpenAI invente cosas
     PRODUCTS = [];
     console.log("⚠️ Catálogo NO cargado. Se bloqueará el modo AI.");
     return;
@@ -98,6 +106,7 @@ async function redisGet(key) {
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` },
   });
+
   const data = await res.json();
   if (!res.ok) return null;
   if (!data?.result) return null;
@@ -136,10 +145,22 @@ const K = {
   state: (wa) => `glowny:state:${wa}`,
   lastprod: (wa) => `glowny:lastprod:${wa}`,
   lock: (wa) => `glowny:lock:${wa}`,
+  mid: (mid) => `glowny:mid:${mid}`, // para dedupe de mensajes
 };
 
 // =============================
-// PRODUCT MATCHING (100%)
+// HELPERS
+// =============================
+function money(n) {
+  return `RD$${Number(n || 0).toLocaleString("en-US")}`;
+}
+
+function safeTrim(s) {
+  return (s || "").toString().trim();
+}
+
+// =============================
+// PRODUCT MATCHING (MEJORADO)
 // =============================
 function findProducts(query) {
   if (!CATALOG_OK) return [];
@@ -154,11 +175,17 @@ function findProducts(query) {
     .map((p) => {
       let score = 0;
 
+      // match completo dentro del nombre
       if (p.normName.includes(q)) score += 10;
 
       // hits por palabras
       const hits = qWords.filter((w) => p.wordSet.has(w)).length;
       score += hits;
+
+      // bonus si coincide por palabra clave larga
+      for (const w of qWords) {
+        if (w.length >= 5 && p.normName.includes(w)) score += 1;
+      }
 
       return { p, score };
     })
@@ -170,11 +197,24 @@ function findProducts(query) {
 
 function getProductById(id) {
   if (!CATALOG_OK) return null;
-  return PRODUCTS.find((p) => p.id === id) || null;
+  return productIndex.find((p) => p.id === id) || null;
 }
 
-function money(n) {
-  return `RD$${Number(n || 0).toLocaleString("en-US")}`;
+function listSimilarByCategory(catNorm, excludeId = null, limit = 5) {
+  if (!catNorm) return [];
+  const arr = categoryIndex.get(catNorm) || [];
+  const filtered = excludeId ? arr.filter((p) => p.id !== excludeId) : arr;
+  return filtered.slice(0, limit);
+}
+
+function getCategoriesMenu(limit = 7) {
+  const cats = Array.from(categoryIndex.keys())
+    .filter((c) => c && c !== "otros")
+    .slice(0, limit);
+
+  if (!cats.length) return null;
+
+  return cats;
 }
 
 // =============================
@@ -203,7 +243,8 @@ function isOrderIntent(text) {
     q.includes("confirmar el pedido") ||
     q.includes("confirmo el pedido") ||
     q.includes("ordenar") ||
-    q.includes("reservar")
+    q.includes("reservar") ||
+    q.includes("comprar")
   );
 }
 
@@ -225,35 +266,73 @@ function extractPayment(text) {
 
 function isAskingForImage(text) {
   const q = normalizeText(text);
-  return q.includes("foto") || q.includes("imagen") || q.includes("muestrame") || q.includes("ver");
+  return (
+    q.includes("foto") ||
+    q.includes("imagen") ||
+    q.includes("muestrame") ||
+    q.includes("mostrar") ||
+    q.includes("ver")
+  );
+}
+
+// ✅ NUEVO: “como se usa”
+function isUsageQuestion(text) {
+  const q = normalizeText(text);
+  return (
+    q.includes("como se usa") ||
+    q.includes("como usar") ||
+    q.includes("modo de uso") ||
+    q.includes("como aplic") ||
+    q.includes("se aplica") ||
+    q.includes("se usa") ||
+    q.includes("cada cuanto") ||
+    q.includes("de dia") ||
+    q.includes("de noche")
+  );
+}
+
+// ✅ NUEVO: “que otras tienes / opciones”
+function isOtherOptionsQuestion(text) {
+  const q = normalizeText(text);
+  return (
+    q.includes("que otras tienes") ||
+    q.includes("cuales otras") ||
+    q.includes("que mas tienes") ||
+    q.includes("tienes mas") ||
+    q.includes("otras opciones") ||
+    q.includes("dame opciones") ||
+    q.includes("algo parecido") ||
+    q.includes("otra opcion")
+  );
 }
 
 // =============================
-// OPENAI (SOLO si de verdad es necesario)
+// OPENAI (SOLO si es necesario)
 // =============================
 function shouldUseOpenAI(text) {
-  // ❌ si no hay catálogo, NO usar
   if (!CATALOG_OK) return false;
 
   const q = normalizeText(text);
 
-  // ❌ si parece pedido/producto, no usar
+  // ❌ si parece pedido/producto/venta directa, no usar AI
   if (
     q.includes("precio") ||
+    q.includes("cuanto cuesta") ||
     q.includes("quiero") ||
     q.includes("necesito") ||
-    q.includes("colageno") ||
-    q.includes("serum") ||
-    q.includes("crema") ||
-    q.includes("aceite") ||
     q.includes("envio") ||
     q.includes("ubicacion") ||
+    q.includes("contra entrega") ||
+    q.includes("transferencia") ||
     isOrderIntent(text)
   ) {
     return false;
   }
 
-  // ✅ si es totalmente fuera del tema
+  // ❌ si es “otras opciones” lo manejamos nosotros
+  if (isOtherOptionsQuestion(text)) return false;
+
+  // ✅ si es algo fuera de catálogo: piel, recomendación, dudas generales
   return true;
 }
 
@@ -262,20 +341,22 @@ function getSystemPrompt() {
 Eres una asistente de ventas por WhatsApp de "Glowny Essentials" en República Dominicana.
 
 REGLAS OBLIGATORIAS:
-- Responde 1 a 3 líneas, corto y directo.
+- Responde corto (1 a 3 líneas), amable y directo.
 - Nunca digas "contacta al equipo de ventas", "visita la web", "soporte", ni nada parecido.
-- No inventes precios ni productos.
-- Si el cliente pregunta algo raro, responde amable y llévalo al catálogo.
+- No inventes precios ni productos. Si te preguntan por productos, solo usa el catálogo.
+- Si te preguntan "cómo se usa", da pasos claros y seguros.
+- Si no estás segura de algo, pregunta 1 sola cosa para aclarar.
 `;
 }
 
-async function callOpenAI(history, userText) {
+async function callOpenAI(history, userText, extraContext = "") {
   if (!OPENAI_API_KEY) {
-    return "Mi amor dime qué producto quieres y te ayudo 😊";
+    return "Mi amor dime qué producto necesitas y te ayudo 😊";
   }
 
   const messages = [
     { role: "system", content: getSystemPrompt() },
+    ...(extraContext ? [{ role: "system", content: extraContext }] : []),
     ...history,
     { role: "user", content: userText },
   ];
@@ -284,7 +365,7 @@ async function callOpenAI(history, userText) {
     model: MODEL,
     messages,
     temperature: 0.2,
-    max_tokens: 160,
+    max_tokens: 180,
   };
 
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -392,6 +473,10 @@ async function getState(wa) {
     location: st.location || null,
     reference: st.reference || null,
     payment: st.payment || null,
+
+    // ✅ NUEVO: contexto real
+    lastCategory: st.lastCategory || null, // normalized category
+    lastProductName: st.lastProductName || null,
   };
 }
 
@@ -421,7 +506,14 @@ app.post("/webhook", async (req, res) => {
     if (!message) return res.sendStatus(200);
 
     const from = message.from;
-    let userText = "";
+    const msgId = message.id;
+
+    // ✅ DEDUPE por message.id (Meta reintenta y por eso ves respuestas raras/repetidas)
+    if (msgId) {
+      const seen = await redisGet(K.mid(msgId));
+      if (seen) return res.sendStatus(200);
+      await redisSet(K.mid(msgId), "1", 60); // 60 segundos
+    }
 
     // lock anti doble respuesta
     const lockKey = K.lock(from);
@@ -438,6 +530,8 @@ app.post("/webhook", async (req, res) => {
       await redisDel(lockKey);
       return res.sendStatus(200);
     }
+
+    let userText = "";
 
     // Location
     if (message.type === "location" && message.location) {
@@ -461,21 +555,106 @@ app.post("/webhook", async (req, res) => {
       userText = message.text?.body || "";
     }
 
+    userText = safeTrim(userText);
     const st = await getState(from);
+
+    // ✅ 0) “Que otras tienes?” -> usar última categoría si existe
+    if (isOtherOptionsQuestion(userText)) {
+      // si ya tengo un producto seleccionado, uso su categoría
+      let cat = st.lastCategory;
+      if (!cat && st.productId) {
+        const p = getProductById(st.productId);
+        if (p?.normCategory) cat = p.normCategory;
+      }
+
+      if (cat) {
+        const options = listSimilarByCategory(cat, st.productId, 5);
+
+        if (options.length) {
+          const lines = options.map((p, i) => `${i + 1}) ${p.name} — ${money(p.price)}`);
+          await sendWhatsAppMessage(
+            from,
+            `Claro mi amor 💗 Aquí tienes más opciones:\n${lines.join("\n")}\n\n¿Cuál te interesa? 😊`
+          );
+          await redisDel(lockKey);
+          return res.sendStatus(200);
+        }
+      }
+
+      // si no hay categoría, mostramos un mini menú
+      const cats = getCategoriesMenu();
+      if (cats?.length) {
+        await sendWhatsAppMessage(
+          from,
+          `Claro 😊 ¿Qué te interesa ver?\n${cats.map((c, i) => `${i + 1}) ${c}`).join("\n")}\n\nRespóndeme con el número o el nombre.`
+        );
+        await redisDel(lockKey);
+        return res.sendStatus(200);
+      }
+
+      await sendWhatsAppMessage(from, "Mi amor dime el nombre del producto que buscas y te digo precio 😊💗");
+      await redisDel(lockKey);
+      return res.sendStatus(200);
+    }
 
     // 1) Detectar producto por texto
     const matches = findProducts(userText);
 
     if (matches.length === 1) {
       const prod = matches[0];
+
       st.productId = prod.id;
+      st.lastCategory = prod.normCategory || st.lastCategory || "otros";
+      st.lastProductName = prod.name;
       await redisSet(K.lastprod(from), prod.id);
 
+      // ✅ “como se usa” justo después de mencionar el producto
+      if (isUsageQuestion(userText)) {
+        // si viene usage en el catálogo
+        if (prod.usage && safeTrim(prod.usage).length > 3) {
+          await setState(from, st);
+          await sendWhatsAppMessage(
+            from,
+            `Modo de uso 💗\n${safeTrim(prod.usage)}\n\n¿Quieres que te lo reserve? 😊`
+          );
+          await redisDel(lockKey);
+          return res.sendStatus(200);
+        }
+
+        // si NO viene usage -> OpenAI con contexto del producto (sin inventar)
+        const extraContext = `
+Producto del catálogo:
+- Nombre: ${prod.name}
+- Categoría: ${prod.category || "N/A"}
+- Precio: ${prod.price}
+Regla: Solo explica modo de uso seguro y general, NO inventes beneficios médicos.
+`;
+        const history = await getMemory(from);
+        const ai = await callOpenAI(history, "¿Cómo se usa este producto?", extraContext);
+
+        const newHistory = [
+          ...history,
+          { role: "user", content: userText },
+          { role: "assistant", content: ai },
+        ];
+        await saveMemory(from, newHistory);
+
+        await setState(from, st);
+        await sendWhatsAppMessage(from, `${ai}\n\n¿Quieres que te lo reserve? 😊`);
+        await redisDel(lockKey);
+        return res.sendStatus(200);
+      }
+
       // si el user quiere pedir o confirmar, avanzar directo
-      if (isOrderIntent(userText) || normalizeText(userText).includes("quiero") || normalizeText(userText).includes("necesito")) {
+      const qNorm = normalizeText(userText);
+      if (isOrderIntent(userText) || qNorm.includes("quiero") || qNorm.includes("necesito")) {
         st.step = "ASK_QTY";
         await setState(from, st);
-        await sendWhatsAppMessage(from, `Tengo ese 💗\n${prod.name}\nPrecio: ${money(prod.price)} c/u\n¿Cuántos deseas? 😊`);
+
+        await sendWhatsAppMessage(
+          from,
+          `Tengo ese 💗\n${prod.name}\nPrecio: ${money(prod.price)} c/u\n¿Cuántos deseas? 😊`
+        );
         await redisDel(lockKey);
         return res.sendStatus(200);
       }
@@ -493,16 +672,54 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // ✅ 1.1) Si el usuario pregunta “cómo se usa” y ya hay producto seleccionado
+    if (isUsageQuestion(userText) && st.productId) {
+      const prod = getProductById(st.productId);
+
+      if (prod) {
+        if (prod.usage && safeTrim(prod.usage).length > 3) {
+          await sendWhatsAppMessage(from, `Modo de uso 💗\n${safeTrim(prod.usage)}\n\n¿Te lo reservo? 😊`);
+          await redisDel(lockKey);
+          return res.sendStatus(200);
+        }
+
+        // OpenAI si no hay usage
+        const extraContext = `
+Producto del catálogo:
+- Nombre: ${prod.name}
+- Categoría: ${prod.category || "N/A"}
+- Precio: ${prod.price}
+Regla: Solo explica modo de uso seguro y general.
+`;
+        const history = await getMemory(from);
+        const ai = await callOpenAI(history, userText, extraContext);
+
+        const newHistory = [
+          ...history,
+          { role: "user", content: userText },
+          { role: "assistant", content: ai },
+        ];
+        await saveMemory(from, newHistory);
+
+        await sendWhatsAppMessage(from, `${ai}\n\n¿Te lo reservo? 😊`);
+        await redisDel(lockKey);
+        return res.sendStatus(200);
+      }
+    }
+
     // 2) Si dice confirmar pedido pero no hay product seleccionado -> usar el lastprod
     if (isOrderIntent(userText) && !st.productId) {
       const last = await redisGet(K.lastprod(from));
       if (last) {
         st.productId = last;
         st.step = "ASK_QTY";
-        await setState(from, st);
-
         const prod = getProductById(last);
+
         if (prod) {
+          st.lastCategory = prod.normCategory || st.lastCategory || "otros";
+          st.lastProductName = prod.name;
+
+          await setState(from, st);
           await sendWhatsAppMessage(from, `Perfecto mi amor 💗\n${prod.name}\nPrecio: ${money(prod.price)}\n¿Cuántos deseas? 😊`);
           await redisDel(lockKey);
           return res.sendStatus(200);
@@ -541,7 +758,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (st.step === "ASK_REFERENCE") {
-      const ref = userText.trim();
+      const ref = safeTrim(userText);
 
       if (!ref || normalizeText(ref) === "ubicacion enviada") {
         await sendWhatsAppMessage(from, "Dime una referencia breve mi amor 😊 (Ej: cerca del colmado)");
@@ -588,7 +805,7 @@ app.post("/webhook", async (req, res) => {
 
       await sendWhatsAppMessage(from, "Listoo 💗✅\nTu pedido quedó confirmado.\nEn breve te lo coordinamos 😊");
 
-      // admin
+      // admin (nota: puede fallar si el admin no está dentro de ventana o no inició chat)
       let adminText = `📦 NUEVO PEDIDO CONFIRMADO - Glowny Essentials\n\n`;
       adminText += `🛒 ${st.qty}x ${prod.name} — ${money(prod.price)}\n`;
       adminText += `💰 Total: ${money(total)}\n`;
@@ -600,7 +817,11 @@ app.post("/webhook", async (req, res) => {
         adminText += `\n📍 Ubicación:\nhttps://www.google.com/maps?q=${st.location.lat},${st.location.lon}\n`;
       }
 
-      await sendWhatsAppMessage(ADMIN_PHONE, adminText);
+      try {
+        await sendWhatsAppMessage(ADMIN_PHONE, adminText);
+      } catch (e) {
+        console.log("⚠️ No se pudo enviar al admin (ventana/permiso).");
+      }
 
       // reset
       await redisDel(K.state(from));
@@ -618,10 +839,17 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    // 5) OpenAI solo si es fuera del tema
+    // ✅ 5) OpenAI solo si es fuera del tema
     if (shouldUseOpenAI(userText)) {
       const history = await getMemory(from);
-      const ai = await callOpenAI(history, userText);
+
+      // Contexto suave para que no se vuelva loco
+      const extraContext = `
+Si el usuario pide recomendaciones, sugiere 1-2 categorías del catálogo y pregunta 1 cosa.
+No inventes productos.
+`;
+
+      const ai = await callOpenAI(history, userText, extraContext);
 
       const newHistory = [
         ...history,
