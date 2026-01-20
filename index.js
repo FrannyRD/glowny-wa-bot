@@ -1,40 +1,41 @@
-/**
- * Glowny Essentials WhatsApp Bot (PRO)
- * - Catálogo + precios 100% controlado por código (NO IA para precios)
- * - OpenAI solo para mensajes fuera de lo normal
- * - Memoria real en Upstash (historial completo)
- * - Anti-duplicado por message.id (WhatsApp reintentos)
- * - Flujo inteligente de pedido (Si -> datos de envío)
- */
-
 const express = require("express");
+const crypto = require("crypto");
 
-// node-fetch dynamic import (compatible con CommonJS)
+// node-fetch dinámico (Render friendly)
 const fetch = (...args) =>
   import("node-fetch").then(({ default: fetch }) => fetch(...args));
 
 const app = express();
 app.use(express.json());
 
-// =========================
+// =============================
 // ENV
-// =========================
+// =============================
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "glowny_verify";
 const WA_TOKEN = process.env.WA_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-nano"; // ✅ recomendado
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-nano"; // ✅ recomendado para bajar tokens
-const ADMIN_PHONE = process.env.ADMIN_PHONE || "18492010239"; // sin +
-const ORDER_TAG = "PEDIDO_CONFIRMADO:";
+// ✅ ADMIN donde llegan pedidos listos (sin +)
+const ADMIN_PHONE = process.env.ADMIN_PHONE || "18492010239";
 
-// Upstash (Redis REST)
+// ✅ Upstash Redis
 const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 
-// =========================
-// ✅ TU CATÁLOGO (JSON)
-// =========================
+// TTLs
+const MEM_TTL_SECONDS = 60 * 60 * 24; // 24h
+const PENDING_TTL_SECONDS = 60 * 60 * 24; // 24h
+const PROFILE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 días
+const REPLY_TTL_SECONDS = 60 * 10; // 10 min anti-loop
+
+// Tag interno (si quieres enviarlo al admin)
+const ORDER_TAG = "PEDIDO_CONFIRMADO:";
+
+// =============================
+// CATÁLOGO (Tu JSON)
+// =============================
 const PRODUCTS = [
   {
     id: "0333fadc-c608-4c6e-a8d4-67d7a3ed117e",
@@ -61,84 +62,12 @@ const PRODUCTS = [
       "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.01851007574591812.jpg",
   },
   {
-    id: "0feaf32e-4201-4cbd-ac77-830486f9192c",
-    name: "Aceite corporal romero Botella 200 ml Deliplus",
-    price: 550,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.36263807809930526.jpg",
-  },
-  {
     id: "104666b4-2391-4ba9-be6b-68fa012f630e",
     name: "Crema protección solar facial Deliplus FPS 50+ resistente al agua 50 ml",
     price: 700,
     category: "Rostro",
     image:
       "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.07349553219793581.jpg",
-  },
-  {
-    id: "144c0a12-1549-4a07-b11e-84e16fcb9217",
-    name: "Crema facial protectora anti-manchas Deliplus FPS 50+ todo tipo de piel 50 ml",
-    price: 900,
-    category: "Rostro",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.766836007795388.jpg",
-  },
-  {
-    id: "2382b32e-952c-46a7-85f0-4716ecc8216e",
-    name: "Toallitas Limpiagafas Bosque Verde monodosis perfumadas 32und",
-    price: 450,
-    category: "Otros",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.9901194809376783.jpg",
-  },
-  {
-    id: "2816c73d-ec50-49f0-9311-848539849ae7",
-    name: "Desodorante para pies fresh & dry Deliplus antitranspirante spray 150 ml",
-    price: 400,
-    category: "Otros",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7412669567328445.jpg",
-  },
-  {
-    id: "2f57e03f-4d2e-4dc6-bd8a-13abda985333",
-    name: "Deliplus Gel higiene intimo liquido hidratante con dosificador 500 ml",
-    price: 500,
-    category: "Higiene íntima",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7787574431351961.jpg",
-  },
-  {
-    id: "363d9ce6-cde3-4e3d-b569-94be86fa0fb7",
-    name: "Exfoliante corporal mineral Deliplus Mar Muerto 400 ml",
-    price: 650,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.964762992512799.jpg",
-  },
-  {
-    id: "38dac334-d123-4a85-bca1-b0c2e805a4e9",
-    name: "Exfoliante corporal marino Deliplus Sal Mar Muerto 400 g",
-    price: 650,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.3357927369198168.jpg",
-  },
-  {
-    id: "45c3abbe-206d-4568-8810-8cb07c844fa4",
-    name: "Gel de baño tiernos recuerdos Deliplus piel normal 750 ml",
-    price: 350,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7576058214157932.jpg",
-  },
-  {
-    id: "4f900df6-82b0-4ffc-a3f3-0a65731d8394",
-    name: "Exfoliante Arcilla Blanca Facial Clean Deliplus piel normal o mixta 100 ml",
-    price: 600,
-    category: "Rostro",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.9089123499909787.jpg",
   },
   {
     id: "5161a1bf-a837-4d3f-a589-d1987aea4c91",
@@ -149,78 +78,6 @@ const PRODUCTS = [
       "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7143289581985477.jpg",
   },
   {
-    id: "55e72417-24eb-4d69-9972-cca5fc3edf8a",
-    name: "Crema protección solar infantil FPS 50+ Deliplus para pieles sensibles y atópicas",
-    price: 650,
-    category: "Rostro",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8439793539752637.jpg",
-  },
-  {
-    id: "615f78c9-b15d-422e-9260-893132c135d8",
-    name: "Gel refrescante mentol Deliplus para pies y piernas 300 ml",
-    price: 550,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.13998940319484232.jpg",
-  },
-  {
-    id: "61f74869-4dbe-4213-91e4-e79d08e9f008",
-    name: "Loción corporal Calm Deliplus omega 3, 6, 9 y niacinamida piel sensible y atópica 400 ml",
-    price: 450,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8733127834132417.jpg",
-  },
-  {
-    id: "671e458a-fdcd-47b3-93d4-cd21af1005ab",
-    name: "Loción corporal Repara Deliplus urea 10% y dexpantenol piel muy seca 400 ml",
-    price: 450,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.6565286896440724.jpg",
-  },
-  {
-    id: "6e5c316e-25b9-429c-ba79-c549f6d20423",
-    name: "Loción corporal Hidrata Deliplus aloe vera y ácido hialurónico piel normal 600 g",
-    price: 550,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.4615014729316803.jpg",
-  },
-  {
-    id: "71dc99d1-e026-4aec-b116-e6c4e14638d5",
-    name: "Crema corporal Nivea 250 ml",
-    price: 600,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8937379278968904.jpg",
-  },
-  {
-    id: "80b3d654-8381-4bad-b29c-6bbc3043c3d6",
-    name: "Gel facial limpiador Facial clean todo tipo de piel Deliplus 250 ml",
-    price: 500,
-    category: "Rostro",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.14096114588484898.jpg",
-  },
-  {
-    id: "88539069-1373-48ee-a1d1-31430869815a",
-    name: "Gel de baño frutal Deliplus piel normal 750 ml",
-    price: 350,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.6750012951424128.jpg",
-  },
-  {
-    id: "8b6f913b-9eff-4233-96c5-d483b70f09a4",
-    name: "Crema de manos hidratante con aloe vera Deliplus 75 ml",
-    price: 350,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7971261774222368.jpg",
-  },
-  {
     id: "8eb7cdea-a920-489a-97ad-60f3ec58497a",
     name: "Comprimidos efervescentes vitamina C y zinc Deliplus sabor limón 20und/80g",
     price: 400,
@@ -228,307 +85,24 @@ const PRODUCTS = [
     image:
       "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7343292665638652.jpg",
   },
-  {
-    id: "901ffafd-9ce6-48ec-8b14-87bd993a62ef",
-    name: "Gel de baño vainilla y miel Deliplus piel normal 750 ml",
-    price: 350,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.9119627229156263.jpg",
-  },
-  {
-    id: "92d65ef0-475e-4b89-ae11-639fd51fb423",
-    name: "Concentrado manual Florena con manteca de karité y aceite de argán 50 ml",
-    price: 250,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7890441674096778.jpg",
-  },
-  {
-    id: "a0f25ca3-e821-4075-87db-40d97372ee67",
-    name: "Serum Facial Potenciador Sisbela Reafirm Deliplus 12% silicio tipo pieles frasco",
-    price: 950,
-    category: "Rostro",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8420422814402666.jpg",
-  },
-  {
-    id: "a161e422-0196-435d-9755-0350ed8ac8c5",
-    name: "Crema depilatoria mujer para el cuerpo Deliplus piel sensible bajo la ducha incluye manopla 200 ml",
-    price: 500,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7471298043382055.jpg",
-  },
-  {
-    id: "aeea794a-564d-49a9-9616-c6122315b423",
-    name: "Sérum facial Ácido Hialurónico y Ceramidas Deliplus Hidrata todo tipo de piel 30 ml",
-    price: 800,
-    category: "Rostro",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/1767924116543-0.399580346122166.jpg",
-  },
-  {
-    id: "b031231b-ac2f-4555-8223-10f7d0cf413c",
-    name: "Gel de baño granada y frutos silvestres Deliplus piel normal 750 ml",
-    price: 350,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8889156108119076.jpg",
-  },
-  {
-    id: "c0373445-7be4-49b1-bd3e-d20095d8a264",
-    name: "Gel corporal aloe vera Deliplus 400 ml",
-    price: 600,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.07272257840533858.jpg",
-  },
-  {
-    id: "c1dfe6da-edca-49ec-88d3-48247ca8f7d8",
-    name: "Deliplus Gel de higiene íntimo líquido con dosificador 500 ml",
-    price: 500,
-    category: "Higiene íntima",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.7470060378444082.jpg",
-  },
-  {
-    id: "c37f4b97-2ab7-45db-b79c-6fd7db2afd02",
-    name: "Crema de manos nutritiva Karité Deliplus 75 ml",
-    price: 350,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.013811606548578825.jpg",
-  },
-  {
-    id: "c3c918b1-e179-4123-9dd1-e1597c447bab",
-    name: "Loción corporal Nutre Deliplus almendras y cica piel seca 600 g",
-    price: 550,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.1886844553433108.jpg",
-  },
-  {
-    id: "c6e534e2-b54b-4d08-93f9-9d82569f297a",
-    name: "Crema protección solar Deliplus FPS 50+ Resistente al agua 100 ml",
-    price: 600,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.6036945328427022.jpg",
-  },
-  {
-    id: "d56a63e7-687a-4282-8464-1e6f43e45283",
-    name: "Gel de baño avena Deliplus piel sensible 750 ml",
-    price: 350,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.10264727845100174.jpg",
-  },
-  {
-    id: "d6791f25-c4ac-4669-8234-ffd0fc3b2f81",
-    name: "Gel de baño frescor azul Deliplus piel normal 750 ml",
-    price: 350,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.44323230998298535.jpg",
-  },
-  {
-    id: "d695db2e-e466-4ce8-8778-38625b8ae129",
-    name: "Gel de baño marino y cedro Deliplus piel normal 750 ml",
-    price: 350,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.38823628813402555.jpg",
-  },
-  {
-    id: "dbb208a2-31e2-4a58-9f09-04bb4dba8d18",
-    name: "Crema facial noche Deliplus aclarante anti-manchas todo tipo de piel 50 ml",
-    price: 900,
-    category: "Rostro",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.1687269797256935.jpg",
-  },
-  {
-    id: "e04590e5-aa64-49c2-8346-2ad8c712915b",
-    name: "Protector Labial Deliplus FPS 15 1und",
-    price: 350,
-    category: "Rostro",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.26585338094003164.jpg",
-  },
-  {
-    id: "e150c27a-c825-4390-b2b2-3c539c4ba4c7",
-    name: "Crema depilatoria hombre Deliplus piel normal bajo la ducha incluye manopla 200 ml",
-    price: 500,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.8309128377524708.jpg",
-  },
-  {
-    id: "e498fd92-e734-4227-9340-7ed097fd79d1",
-    name: "Gel de baño 10% urea Deliplus piel áspera y deshidratada 500 ml",
-    price: 400,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.47965691702378466.jpg",
-  },
-  {
-    id: "e5504c4e-83f9-4937-b819-9419292da3c8",
-    name: "Manteca corporal Murumuru Deliplus 300 ml",
-    price: 550,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.17408592890249042.jpg",
-  },
-  {
-    id: "e69f2c20-3841-4af7-9a2e-cbbfec30bb80",
-    name: "Leche facial limpiadora Facial Clean todo tipo de piel Deliplus 250 ml",
-    price: 450,
-    category: "Rostro",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.6289164249460402.jpg",
-  },
-  {
-    id: "e72e17d0-38b8-4aa2-b66f-bd47fd807cb1",
-    name: "Crema solar SPF 50+ en formato spray",
-    price: 900,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.890999533523696.jpg",
-  },
-  {
-    id: "e7589330-248e-4fd7-a645-3d27e924ad5a",
-    name: "Deliplus Crema corporal aceite argan 250 ml",
-    price: 450,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.05540865085271529.jpg",
-  },
-  {
-    id: "e88b9703-973e-4b56-901f-0ef39c2e4fca",
-    name: "Desodorante piedra de alumbre mineral Deonat para todo tipo de piel 60 g",
-    price: 400,
-    category: "Otros",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.9331449890013408.jpg",
-  },
-  {
-    id: "ea3e8d68-fd4b-486b-98ac-2408fc05f855",
-    name: "Deliplus Crema corporal aceite oliva 250 ml",
-    price: 450,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.792738396021052.jpg",
-  },
-  {
-    id: "f1ef9bad-471c-4edc-8436-5b0625f1eaba",
-    name: "Gel de baño ambar y vetiver Deliplus piel normal 750 ml",
-    price: 350,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.29018513988843364.jpg",
-  },
-  {
-    id: "f7a9aed0-a940-4584-aaf5-807e24c34bd4",
-    name: "Deliplus Exfoliante corporal con coco 250 ml",
-    price: 650,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.6693914752431569.jpg",
-  },
-  {
-    id: "fa1ac7aa-48e4-4c4b-97f2-0c7ce3f812a9",
-    name: "Gel de baño argán Deliplus piel muy seca 500 ml",
-    price: 400,
-    category: "Cuerpo",
-    image:
-      "https://okfohritwwslnsjzkwwr.supabase.co/storage/v1/object/public/images/0.3166909672180076.jpg",
-  },
+  // ✅ (Puedes seguir pegando el resto igual)
 ];
 
-// =========================
-// Upstash Redis REST helpers
-// =========================
-async function upstashFetch(path, body = null) {
-  if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) {
-    throw new Error("Faltan UPSTASH_REDIS_REST_URL o UPSTASH_REDIS_REST_TOKEN en ENV");
-  }
+// =============================
+// ALIAS (para que no confunda colágeno con magnesio)
+// =============================
+const PRODUCT_ALIASES = [
+  { key: "colageno", productId: "5161a1bf-a837-4d3f-a589-d1987aea4c91" },
+  { key: "colágeno", productId: "5161a1bf-a837-4d3f-a589-d1987aea4c91" },
+  { key: "rosa mosqueta", productId: "0e290ffc-c710-40b8-8409-206466bc5217" },
+  { key: "protector solar facial", productId: "104666b4-2391-4ba9-be6b-68fa012f630e" },
+  { key: "magnesio", productId: "0552881d-7395-4d9e-8d60-10e01a879e10" },
+  { key: "vitamina c", productId: "8eb7cdea-a920-489a-97ad-60f3ec58497a" },
+];
 
-  const url = `${UPSTASH_REDIS_REST_URL}${path}`;
-  const res = await fetch(url, {
-    method: body ? "POST" : "GET",
-    headers: {
-      Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-
-  const data = await res.json();
-  return data;
-}
-
-async function redisGet(key) {
-  const data = await upstashFetch(`/get/${encodeURIComponent(key)}`);
-  return data?.result ?? null;
-}
-
-async function redisSet(key, value, ttlSeconds = null) {
-  // Upstash REST set: /set/<key>/<value>
-  // Para TTL usamos /set + /expire
-  await upstashFetch(`/set/${encodeURIComponent(key)}/${encodeURIComponent(value)}`);
-  if (ttlSeconds) {
-    await upstashFetch(`/expire/${encodeURIComponent(key)}/${ttlSeconds}`);
-  }
-}
-
-async function redisDel(key) {
-  await upstashFetch(`/del/${encodeURIComponent(key)}`);
-}
-
-async function redisGetJson(key) {
-  const raw = await redisGet(key);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-async function redisSetJson(key, obj, ttlSeconds = null) {
-  const value = JSON.stringify(obj);
-  await redisSet(key, value, ttlSeconds);
-}
-
-// =========================
-// Keys helpers
-// =========================
-function memKey(wa) {
-  return `glowny:mem:${wa}`;
-}
-function pendingKey(wa) {
-  return `glowny:pending:${wa}`;
-}
-function lastProdKey(wa) {
-  return `glowny:lastprod:${wa}`;
-}
-function lastReplyKey(wa) {
-  return `glowny:lastreply:${wa}`;
-}
-function seenMsgKey(msgId) {
-  return `glowny:seen:${msgId}`;
-}
-function lastLocKey(wa) {
-  return `glowny:loc:${wa}`;
-}
-function entryProductKey(wa) {
-  return `glowny:entry:${wa}`;
-}
-
-// =========================
-// Text helpers
-// =========================
+// =============================
+// HELPERS
+// =============================
 function normalizeText(s) {
   return (s || "")
     .toLowerCase()
@@ -536,6 +110,60 @@ function normalizeText(s) {
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function sha1(text) {
+  return crypto.createHash("sha1").update(text).digest("hex");
+}
+
+function parseQty(text) {
+  const t = normalizeText(text);
+  // busca "1", "2", etc
+  const m = t.match(/\b(\d{1,2})\b/);
+  if (m) return Math.max(1, Math.min(99, parseInt(m[1], 10)));
+
+  // palabras comunes
+  if (t.includes("una") || t.includes("un ")) return 1;
+  if (t.includes("dos")) return 2;
+  if (t.includes("tres")) return 3;
+
+  return null;
+}
+
+function isYes(text) {
+  const t = normalizeText(text);
+  return (
+    t === "si" ||
+    t === "sí" ||
+    t.includes("claro") ||
+    t.includes("dale") ||
+    t.includes("ok") ||
+    t.includes("perfecto") ||
+    t.includes("confirmo") ||
+    t.includes("confirmar") ||
+    t.includes("lo quiero") ||
+    t.includes("quiero ese") ||
+    t.includes("reserva") ||
+    t.includes("reservalo")
+  );
+}
+
+function isNo(text) {
+  const t = normalizeText(text);
+  return t === "no" || t.includes("no gracias") || t.includes("despues");
+}
+
+function isPaymentMessage(text) {
+  const t = normalizeText(text);
+  return (
+    t.includes("contra entrega") ||
+    t.includes("contraentrega") ||
+    t.includes("transferencia") ||
+    t.includes("transfer") ||
+    t.includes("deposito") ||
+    t.includes("depósito") ||
+    t.includes("tarjeta")
+  );
 }
 
 function isAskingForImage(text) {
@@ -547,64 +175,26 @@ function isAskingForImage(text) {
     q.includes("presentación") ||
     q.includes("ver") ||
     q.includes("muestrame") ||
-    q.includes("muéstrame") ||
+    q.includes("muestra") ||
     q.includes("ensename") ||
-    q.includes("enséñame")
+    q.includes("enseñame")
   );
 }
 
-function isYes(text) {
-  const q = normalizeText(text);
-  return ["si", "sí", "dale", "ok", "okay", "de acuerdo", "confirmo", "claro", "ajá", "aha", "yes"].some((w) =>
-    q === w || q.includes(w)
-  );
-}
-
-function isNo(text) {
-  const q = normalizeText(text);
-  return ["no", "nel", "negativo", "no gracias", "despues", "después"].some((w) => q === w || q.includes(w));
-}
-
-function extractQty(text) {
-  const q = normalizeText(text);
-  // buscar "2", "3", etc
-  const m = q.match(/\b(\d{1,2})\b/);
-  if (!m) return null;
-  const n = Number(m[1]);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  return n;
-}
-
-// =========================
-// Product matching (MUY MEJORADO)
-// =========================
-function findBestProduct(text) {
+// Match product by aliases first, then by fuzzy words
+function findProduct(text) {
   const q = normalizeText(text);
   if (!q) return null;
 
-  // 🔥 atajo fuerte: si mencionan colageno => devolver el colageno siempre
-  if (q.includes("colageno") || q.includes("colágeno")) {
-    return PRODUCTS.find((p) => normalizeText(p.name).includes("colageno")) || null;
-  }
-
-  // atajos por keywords comunes
-  const keywordMap = [
-    { key: "rosa mosqueta", contains: ["rosa", "mosqueta"], must: "rosa mosqueta" },
-    { key: "protector solar", contains: ["protector", "solar"], must: "proteccion solar" },
-    { key: "magnesio", contains: ["magnesio"], must: "magnesio" },
-    { key: "vitamina c", contains: ["vitamina", "c"], must: "vitamina c" },
-    { key: "gel intimo", contains: ["intimo", "íntimo"], must: "higiene intimo" },
-  ];
-
-  for (const km of keywordMap) {
-    const ok = km.contains.every((w) => q.includes(normalizeText(w)));
-    if (ok) {
-      const prod = PRODUCTS.find((p) => normalizeText(p.name).includes(normalizeText(km.must)));
-      if (prod) return prod;
+  // 1) Alias exactos
+  for (const a of PRODUCT_ALIASES) {
+    if (q.includes(normalizeText(a.key))) {
+      const p = PRODUCTS.find((x) => x.id === a.productId);
+      if (p) return p;
     }
   }
 
-  // scoring general
+  // 2) Fuzzy por palabras
   let best = null;
   let bestScore = 0;
 
@@ -612,23 +202,15 @@ function findBestProduct(text) {
 
   for (const p of PRODUCTS) {
     const name = normalizeText(p.name);
+    const nameWords = new Set(name.split(" ").filter(Boolean));
     let score = 0;
 
-    // exact contains grandes
-    if (name.includes(q)) score += 12;
+    // contains fuerte
+    if (name.includes(q)) score += 6;
 
-    // hits por palabra (evita “de”, “con”, etc)
-    const stop = new Set(["de", "con", "para", "y", "el", "la", "los", "las", "un", "una", "ml", "g", "und"]);
-    const nameWords = new Set(name.split(" ").filter((w) => w && !stop.has(w)));
-    const filteredQ = qWords.filter((w) => w && !stop.has(w));
-
-    const hits = filteredQ.filter((w) => nameWords.has(w)).length;
-    score += hits * 2;
-
-    // boost por categoria si preguntan "suplemento", "rostro", etc
-    if (q.includes("suplemento") && normalizeText(p.category).includes("suplement")) score += 3;
-    if (q.includes("rostro") && normalizeText(p.category).includes("rostro")) score += 3;
-    if (q.includes("cuerpo") && normalizeText(p.category).includes("cuerpo")) score += 3;
+    // words hits
+    const hits = qWords.filter((w) => w.length >= 4 && nameWords.has(w)).length;
+    score += hits;
 
     if (score > bestScore) {
       bestScore = score;
@@ -636,82 +218,159 @@ function findBestProduct(text) {
     }
   }
 
-  if (bestScore >= 4) return best; // umbral seguro
+  if (bestScore >= 2) return best;
   return null;
 }
 
-// =========================
-// Memory (Upstash) - GUARDA SIEMPRE TODO
-// =========================
-async function appendToMemory(wa, role, content) {
-  const key = memKey(wa);
-  let mem = await redisGetJson(key);
-  if (!Array.isArray(mem)) mem = [];
+// =============================
+// UPSTASH REDIS (REST)
+// =============================
+async function upstashCmd(cmd, ...args) {
+  if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return null;
 
-  mem.push({ role, content });
+  const path = [cmd, ...args].map((x) => encodeURIComponent(String(x))).join("/");
+  const url = `${UPSTASH_REDIS_REST_URL}/${path}`;
 
-  // guardar max 20 mensajes
-  if (mem.length > 20) mem = mem.slice(-20);
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
+    },
+  });
 
-  // 30 días
-  await redisSetJson(key, mem, 60 * 60 * 24 * 30);
+  const data = await resp.json();
+  return data;
 }
 
+async function redisGet(key) {
+  const r = await upstashCmd("get", key);
+  return r?.result ?? null;
+}
+
+async function redisSet(key, value, ttlSec) {
+  // set key value
+  await upstashCmd("set", key, value);
+  if (ttlSec) await upstashCmd("expire", key, ttlSec);
+}
+
+async function redisDel(key) {
+  await upstashCmd("del", key);
+}
+
+function kMem(wa) {
+  return `glowny:mem:${wa}`;
+}
+function kPending(wa) {
+  return `glowny:pending:${wa}`;
+}
+function kProfile(wa) {
+  return `glowny:profile:${wa}`;
+}
+function kLoc(wa) {
+  return `glowny:loc:${wa}`;
+}
+function kLastProd(wa) {
+  return `glowny:lastprod:${wa}`;
+}
+function kLastReply(wa) {
+  return `glowny:lastreply:${wa}`;
+}
+
+// =============================
+// DATA LAYERS
+// =============================
 async function getMemory(wa) {
-  const mem = await redisGetJson(memKey(wa));
-  return Array.isArray(mem) ? mem : [];
+  const raw = await redisGet(kMem(wa));
+  if (!raw) return [];
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return [];
+  }
 }
 
-// =========================
-// Pending State (Upstash)
-// stage:
-// - "await_confirm" : esperando que diga "Si" para reservar
-// - "await_name"    : pedir nombre
-// - "await_address" : pedir sector + direccion
-// - "await_location": pedir ubicacion mapa opcional
-// - "await_payment" : pedir metodo de pago
-// - "done"          : pedido listo
-// =========================
+async function setMemory(wa, arr) {
+  const limited = Array.isArray(arr) ? arr.slice(-10) : [];
+  await redisSet(kMem(wa), JSON.stringify(limited), MEM_TTL_SECONDS);
+}
+
+async function appendToMemory(wa, role, content) {
+  const mem = await getMemory(wa);
+  mem.push({ role, content });
+  await setMemory(wa, mem);
+}
+
 async function getPending(wa) {
-  const p = await redisGetJson(pendingKey(wa));
-  return p && typeof p === "object" ? p : null;
+  const raw = await redisGet(kPending(wa));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 async function setPending(wa, obj) {
-  await redisSetJson(pendingKey(wa), obj, 60 * 60 * 24 * 2); // 48h
+  await redisSet(kPending(wa), JSON.stringify(obj), PENDING_TTL_SECONDS);
 }
 
 async function clearPending(wa) {
-  await redisDel(pendingKey(wa));
+  await redisDel(kPending(wa));
 }
 
-// =========================
-// Location store
-// =========================
-async function setLastLocation(wa, loc) {
-  await redisSetJson(lastLocKey(wa), loc, 60 * 60 * 24 * 7);
+async function getProfile(wa) {
+  const raw = await redisGet(kProfile(wa));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function setProfile(wa, profile) {
+  await redisSet(kProfile(wa), JSON.stringify(profile), PROFILE_TTL_SECONDS);
 }
 
 async function getLastLocation(wa) {
-  const loc = await redisGetJson(lastLocKey(wa));
-  return loc && typeof loc === "object" ? loc : null;
+  const raw = await redisGet(kLoc(wa));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
-// =========================
-// last product store
-// =========================
-async function setLastProduct(wa, productId) {
-  await redisSet(productId ? lastProdKey(wa) : lastProdKey(wa), productId || "", 60 * 60 * 24 * 7);
+async function setLastLocation(wa, loc) {
+  await redisSet(kLoc(wa), JSON.stringify(loc), MEM_TTL_SECONDS);
 }
 
-async function getLastProduct(wa) {
-  const v = await redisGet(lastProdKey(wa));
-  return v || null;
+async function getLastProductSeen(wa) {
+  const raw = await redisGet(kLastProd(wa));
+  return raw || null;
 }
 
-// =========================
+async function setLastProductSeen(wa, productId) {
+  await redisSet(kLastProd(wa), String(productId), MEM_TTL_SECONDS);
+}
+
+async function preventSameReply(wa, replyText) {
+  // devuelve true si es repetido (y lo bloquea)
+  const lastHash = await redisGet(kLastReply(wa));
+  const nowHash = sha1(replyText);
+
+  if (lastHash && lastHash === nowHash) {
+    return true;
+  }
+
+  await redisSet(kLastReply(wa), nowHash, REPLY_TTL_SECONDS);
+  return false;
+}
+
+// =============================
 // WhatsApp Senders
-// =========================
+// =============================
 async function sendWhatsAppMessage(to, text) {
   const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
 
@@ -742,17 +401,14 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
     messaging_product: "whatsapp",
     to,
     type: "image",
-    image: {
-      link: imageUrl,
-      caption,
-    },
+    image: { link: imageUrl, caption },
   };
 
   const res = await fetch(url, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
       Authorization: `Bearer ${WA_TOKEN}`,
+      "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
   });
@@ -761,47 +417,61 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
   console.log("WhatsApp send image:", JSON.stringify(data, null, 2));
 }
 
-// =========================
-// OpenAI (solo fallback)
-// =========================
-function buildSystemPrompt({ pending, productContext }) {
-  return `
-Eres una asistente de ventas por WhatsApp de "Glowny Essentials" (República Dominicana).
+// ✅ Botón nativo: pedir ubicación
+async function sendWhatsAppLocationRequest(to) {
+  const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
 
-REGLAS:
-- Responde en español dominicano neutro.
-- Respuestas cortas (1-3 líneas).
-- No inventes precios, ni inventes productos.
-- Si el cliente escribe algo raro, responde amable y vuelve al objetivo: elegir producto y cerrar pedido.
+  const body = {
+    messaging_product: "whatsapp",
+    to,
+    type: "interactive",
+    interactive: {
+      type: "location_request_message",
+      body: {
+        text: "📍 Para entregarte, envíame tu ubicación tocando el botón de abajo 💗",
+      },
+      action: {
+        name: "send_location",
+      },
+    },
+  };
 
-IMPORTANTE:
-Los precios y productos los maneja el sistema, NO tú.
-Tú solo ayudas a guiar la conversación.
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${WA_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
 
-ESTADO ACTUAL:
-${pending ? JSON.stringify(pending) : "Sin pedido en proceso"}
-
-CONTEXTO DE PRODUCTO (si existe):
-${productContext ? JSON.stringify(productContext) : "N/A"}
-
-Cuando el cliente confirme el pedido, responde pidiendo:
-1) Nombre completo
-2) Ciudad/sector
-3) Dirección + referencia
-4) Método de pago
-
-Nunca pidas "qué producto" si ya hay uno confirmado en el estado.
-`.trim();
+  const data = await res.json();
+  console.log("WhatsApp location request:", JSON.stringify(data, null, 2));
 }
 
-async function callOpenAI({ waNumber, userText, pending, productContext }) {
-  // memoria corta para OpenAI
-  const mem = await getMemory(waNumber);
-  const shortHistory = mem.slice(-8); // max 8 mensajes para bajar tokens
+// =============================
+// OpenAI (solo fallback)
+// =============================
+function getFallbackSystemPrompt() {
+  return `
+Eres una asistente de ventas de Glowny Essentials (RD).
+Responde corto (1-3 líneas).
+Si el cliente pregunta cosas fuera del catálogo, explica breve y guía a pedir.
+No inventes precios.
+Si no entiendes, pide que lo repita.
+`;
+}
+
+async function callOpenAI(waNumber, userText) {
+  if (!OPENAI_API_KEY) {
+    return "Mi amor 💗 ¿me lo repites más claro para ayudarte mejor?";
+  }
+
+  const history = await getMemory(waNumber);
 
   const messages = [
-    { role: "system", content: buildSystemPrompt({ pending, productContext }) },
-    ...shortHistory,
+    { role: "system", content: getFallbackSystemPrompt() },
+    ...history.slice(-6),
     { role: "user", content: userText },
   ];
 
@@ -812,116 +482,94 @@ async function callOpenAI({ waNumber, userText, pending, productContext }) {
     max_tokens: 180,
   };
 
-  try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify(payload),
-    });
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify(payload),
+  });
 
-    const data = await res.json();
+  const data = await response.json();
 
-    if (!res.ok) {
-      console.log("OpenAI error:", JSON.stringify(data, null, 2));
-      const code = data?.error?.code || "";
-      if (code === "rate_limit_exceeded") {
-        return "Dame 5 segunditos 🙏 y me lo repites.";
-      }
-      return "Ay mi amor 😥 tuve un fallito. ¿Me lo repites?";
-    }
-
-    const reply = data?.choices?.[0]?.message?.content?.trim();
-    return reply || "¿Me lo repites porfa? 😊";
-  } catch (e) {
-    console.log("OpenAI exception:", e);
-    return "Ay mi amor 😥 tuve un fallito. ¿Me lo repites?";
+  if (!response.ok) {
+    console.log("OpenAI error:", JSON.stringify(data, null, 2));
+    return "Dame 5 segunditos 🙏 y me lo repites.";
   }
+
+  const reply =
+    data.choices?.[0]?.message?.content ||
+    "Mi amor 💗 ¿me lo repites?";
+
+  await appendToMemory(waNumber, "user", userText);
+  await appendToMemory(waNumber, "assistant", reply);
+
+  return reply;
 }
 
-// =========================
-// Anti-duplicate replies
-// =========================
-async function preventSameReply(wa, newReply) {
-  const last = await redisGet(lastReplyKey(wa));
-  if (last && normalizeText(last) === normalizeText(newReply)) {
-    return true;
-  }
-  await redisSet(lastReplyKey(wa), newReply, 60 * 60 * 6);
-  return false;
+// =============================
+// FLOW CORE (sin OpenAI)
+// =============================
+function makeProductCard(prod) {
+  return (
+    `Tengo este 💗\n` +
+    `${prod.name}\n` +
+    `Precio: RD$${prod.price} c/u\n` +
+    `¿Te reservo 1 unidad? 😊`
+  );
 }
 
-// =========================
-// Build admin order
-// =========================
-function calcTotal(items) {
+function makeOrderSummary(items) {
   let total = 0;
+  let lines = [];
   for (const it of items) {
     const p = PRODUCTS.find((x) => x.id === it.productId);
     if (!p) continue;
-    total += (it.qty || 1) * p.price;
+    const qty = Number(it.qty || 1);
+    const sub = p.price * qty;
+    total += sub;
+    lines.push(`• ${qty}x ${p.name} — RD$${p.price}`);
   }
-  return total;
+  return { lines, total };
 }
 
-function buildOrderJson(pending) {
-  // estructura segura
-  return {
-    cliente: pending?.name || "",
-    items: (pending?.items || []).map((x) => ({
-      name: x.nameExact || "",
-      qty: x.qty || 1,
-    })),
-    nota: pending?.note || "",
-  };
-}
-
-// =========================
-// Webhook Verify (GET)
-// =========================
+// =============================
+// Webhook Verify
+// =============================
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("Webhook verificado ✅");
+    console.log("✅ Webhook verificado");
     return res.status(200).send(challenge);
   }
-
-  console.log("Webhook no verificado ❌");
   return res.sendStatus(403);
 });
 
-// =========================
-// Webhook Receive (POST)
-// =========================
+// =============================
+// Webhook Receive
+// =============================
 app.post("/webhook", async (req, res) => {
   try {
     const entry = req.body?.entry?.[0];
     const changes = entry?.changes?.[0];
     const value = changes?.value;
 
-    // a veces solo vienen statuses
     const message = value?.messages?.[0];
     if (!message) return res.sendStatus(200);
 
-    const msgId = message.id;
     const from = message.from;
+    const type = message.type;
 
-    // ✅ ANTI DUPLICADO por msgId
-    if (msgId) {
-      const seen = await redisGet(seenMsgKey(msgId));
-      if (seen) return res.sendStatus(200);
-      await redisSet(seenMsgKey(msgId), "1", 60 * 60); // 1 hora
-    }
-
-    // texto usuario
-    let userText = "";
-    if (message.type === "location" && message.location) {
+    // =============================
+    // 1) SI ES UBICACIÓN -> GUARDAR Y AVANZAR FLUJO
+    // =============================
+    if (type === "location" && message.location) {
       const loc = message.location;
+
       await setLastLocation(from, {
         latitude: loc.latitude,
         longitude: loc.longitude,
@@ -929,81 +577,241 @@ app.post("/webhook", async (req, res) => {
         address: loc.address || "",
       });
 
-      userText =
-        "Te acabo de enviar mi ubicación por el mapa de WhatsApp. " +
-        (loc.address ? `Dirección del mapa: ${loc.address}.` : "");
-    } else {
-      userText = message.text?.body || "";
-    }
+      // si estamos esperando ubicación, seguimos
+      const pending = await getPending(from);
+      if (pending && pending.stage === "await_location") {
+        pending.stage = "await_reference";
+        await setPending(from, pending);
 
-    userText = userText.trim();
-    if (!userText) return res.sendStatus(200);
+        const reply =
+          "Perfecto ✅\nAhora dime solo una *referencia* (Ej: edificio, apto, color puerta o punto cerca) 💗";
 
-    // ✅ Guardar SIEMPRE el mensaje del usuario en memoria
-    await appendToMemory(from, "user", userText);
-
-    // =========================
-    // Referral / anuncio
-    // =========================
-    if (message.referral) {
-      const ref = message.referral;
-      const posibleNombre = ref.headline || ref.body || ref.source_url || "";
-      if (posibleNombre) {
-        await redisSet(entryProductKey(from), posibleNombre, 60 * 60 * 24 * 7);
-        // intenta detectar producto del anuncio
-        const adProd = findBestProduct(posibleNombre);
-        if (adProd) await setLastProduct(from, adProd.id);
+        if (!(await preventSameReply(from, reply))) {
+          await appendToMemory(from, "assistant", reply);
+          await sendWhatsAppMessage(from, reply);
+        }
       }
+      return res.sendStatus(200);
     }
 
-    // =========================
-    // Detectar producto por texto
-    // =========================
-    const matchedProduct = findBestProduct(userText);
-    if (matchedProduct) {
-      await setLastProduct(from, matchedProduct.id);
+    // =============================
+    // 2) TEXTO NORMAL
+    // =============================
+    const userText = message.text?.body || "";
+    const textNorm = normalizeText(userText);
+
+    // Cargar pending / profile
+    let pending = await getPending(from);
+    let profile = await getProfile(from);
+
+    // =============================
+    // A) DETECTAR PRODUCTO (si viene en el texto)
+    // =============================
+    const detectedProduct = findProduct(userText);
+    if (detectedProduct) {
+      await setLastProductSeen(from, detectedProduct.id);
     }
 
-    // =========================
-    // Responder imagen si piden
-    // =========================
+    // =============================
+    // B) SI PIDE FOTO/IMAGEN => ENVIAR IMAGEN DEL ÚLTIMO PRODUCTO
+    // =============================
     if (isAskingForImage(userText)) {
-      const pid = (matchedProduct && matchedProduct.id) || (await getLastProduct(from));
+      const pid = await getLastProductSeen(from);
       const prod = PRODUCTS.find((p) => p.id === pid);
       if (prod?.image) {
         const caption = `${prod.name}\nPrecio: RD$${prod.price}\n¿Te lo reservo? 💗`;
-        // guardar memoria
-        await appendToMemory(from, "assistant", `[IMG] ${caption}`);
-        await sendWhatsAppImage(from, prod.image, caption);
+        if (!(await preventSameReply(from, caption))) {
+          await sendWhatsAppImage(from, prod.image, caption);
+        }
         return res.sendStatus(200);
       }
     }
 
-    // =========================
-    // Pending / flujo de pedido
-    // =========================
-    let pending = await getPending(from);
+    // =============================
+    // C) INICIO / SIN PENDING
+    // =============================
+    if (!pending) {
+      // si detectó producto, responde producto
+      if (detectedProduct) {
+        const reply = makeProductCard(detectedProduct);
 
-    // Si no hay pending y detectamos producto => iniciar confirmación
-    if (!pending && matchedProduct) {
-      const qty = extractQty(userText) || 1;
+        if (!(await preventSameReply(from, reply))) {
+          await appendToMemory(from, "assistant", reply);
+          await sendWhatsAppMessage(from, reply);
+        }
 
-      pending = {
-        stage: "await_confirm",
-        items: [
-          {
-            productId: matchedProduct.id,
-            nameExact: matchedProduct.name,
-            qty,
-            price: matchedProduct.price,
-          },
-        ],
-        createdAt: Date.now(),
-      };
+        // crear pending de venta
+        pending = {
+          stage: "await_reserve",
+          items: [{ productId: detectedProduct.id, qty: 1 }],
+        };
+        await setPending(from, pending);
 
+        return res.sendStatus(200);
+      }
+
+      // si no detecta producto, saluda y pregunta
+      const hi =
+        "¡Hola! 😊\n¿Qué producto estás buscando hoy en Glowny Essentials? 💗";
+
+      if (!(await preventSameReply(from, hi))) {
+        await appendToMemory(from, "assistant", hi);
+        await sendWhatsAppMessage(from, hi);
+      }
+
+      pending = { stage: "idle", items: [] };
       await setPending(from, pending);
 
-      const reply = `Tengo este 💗\n${matchedProduct.name}\nPrecio: RD$${matchedProduct.price} c/u\n¿Te reservo ${qty} unidad${qty > 1 ? "es" : ""}? 😊`;
+      return res.sendStatus(200);
+    }
+
+    // =============================
+    // D) FLUJO DE PEDIDO (STATE MACHINE)
+    // =============================
+
+    // 1) idle -> si menciona producto ahora
+    if (pending.stage === "idle") {
+      if (detectedProduct) {
+        const reply = makeProductCard(detectedProduct);
+
+        if (!(await preventSameReply(from, reply))) {
+          await appendToMemory(from, "assistant", reply);
+          await sendWhatsAppMessage(from, reply);
+        }
+
+        pending.stage = "await_reserve";
+        pending.items = [{ productId: detectedProduct.id, qty: 1 }];
+        await setPending(from, pending);
+        return res.sendStatus(200);
+      }
+
+      // fallback
+      const fallback =
+        "Dime cuál producto deseas 💗 (Ej: colágeno, rosa mosqueta, protector solar).";
+      if (!(await preventSameReply(from, fallback))) {
+        await appendToMemory(from, "assistant", fallback);
+        await sendWhatsAppMessage(from, fallback);
+      }
+      return res.sendStatus(200);
+    }
+
+    // 2) await_reserve -> si dice sí/no o manda cantidad
+    if (pending.stage === "await_reserve") {
+      if (isNo(userText)) {
+        pending.stage = "idle";
+        pending.items = [];
+        await setPending(from, pending);
+
+        const reply = "Está bien mi amor 💗\nCuando quieras me dices qué necesitas 😊";
+        if (!(await preventSameReply(from, reply))) {
+          await appendToMemory(from, "assistant", reply);
+          await sendWhatsAppMessage(from, reply);
+        }
+        return res.sendStatus(200);
+      }
+
+      // si dice sí, preguntar cantidad o tomar la que venga
+      if (isYes(userText)) {
+        pending.stage = "await_qty";
+        await setPending(from, pending);
+
+        const reply = "Perfecto 😊\n¿Cuántas unidades quieres? (Ej: 1, 2, 3)";
+        if (!(await preventSameReply(from, reply))) {
+          await appendToMemory(from, "assistant", reply);
+          await sendWhatsAppMessage(from, reply);
+        }
+        return res.sendStatus(200);
+      }
+
+      // si ya escribió "quiero 2 colágenos" etc
+      const qty = parseQty(userText);
+      if (qty) {
+        pending.items[0].qty = qty;
+        pending.stage = "await_name";
+        await setPending(from, pending);
+
+        // si ya tiene nombre guardado en profile, saltar name
+        if (profile?.name) {
+          pending.name = profile.name;
+          pending.stage = "await_location";
+          await setPending(from, pending);
+
+          await sendWhatsAppLocationRequest(from);
+
+          const reply =
+            "Perfecto ✅\nEscríbeme solo una *referencia* (Ej: edificio, apto o punto cerca) 💗";
+          if (!(await preventSameReply(from, reply))) {
+            await appendToMemory(from, "assistant", reply);
+            await sendWhatsAppMessage(from, reply);
+          }
+          return res.sendStatus(200);
+        }
+
+        const reply = "Dime tu *nombre completo* para el pedido 💗";
+        if (!(await preventSameReply(from, reply))) {
+          await appendToMemory(from, "assistant", reply);
+          await sendWhatsAppMessage(from, reply);
+        }
+        return res.sendStatus(200);
+      }
+
+      // si no dice sí/no -> repite info del producto detectado o último
+      const pid = await getLastProductSeen(from);
+      const prod = PRODUCTS.find((p) => p.id === pid) || detectedProduct;
+      if (prod) {
+        const reply = makeProductCard(prod);
+        if (!(await preventSameReply(from, reply))) {
+          await appendToMemory(from, "assistant", reply);
+          await sendWhatsAppMessage(from, reply);
+        }
+        pending.stage = "await_reserve";
+        pending.items = [{ productId: prod.id, qty: 1 }];
+        await setPending(from, pending);
+        return res.sendStatus(200);
+      }
+
+      // fallback OpenAI
+      const ai = await callOpenAI(from, userText);
+      if (!(await preventSameReply(from, ai))) {
+        await sendWhatsAppMessage(from, ai);
+      }
+      return res.sendStatus(200);
+    }
+
+    // 3) await_qty -> guardar qty
+    if (pending.stage === "await_qty") {
+      const qty = parseQty(userText);
+      if (!qty) {
+        const reply = "Mi amor 😊\nDime un número de unidades (Ej: 1, 2, 3)";
+        if (!(await preventSameReply(from, reply))) {
+          await appendToMemory(from, "assistant", reply);
+          await sendWhatsAppMessage(from, reply);
+        }
+        return res.sendStatus(200);
+      }
+
+      pending.items[0].qty = qty;
+      pending.stage = "await_name";
+      await setPending(from, pending);
+
+      // si ya hay profile name, saltar
+      if (profile?.name) {
+        pending.name = profile.name;
+        pending.stage = "await_location";
+        await setPending(from, pending);
+
+        await sendWhatsAppLocationRequest(from);
+
+        const reply =
+          "Perfecto ✅\nEscríbeme solo una *referencia* (Ej: edificio, apto o punto cerca) 💗";
+        if (!(await preventSameReply(from, reply))) {
+          await appendToMemory(from, "assistant", reply);
+          await sendWhatsAppMessage(from, reply);
+        }
+        return res.sendStatus(200);
+      }
+
+      const reply = "Dime tu *nombre completo* para el pedido 💗";
       if (!(await preventSameReply(from, reply))) {
         await appendToMemory(from, "assistant", reply);
         await sendWhatsAppMessage(from, reply);
@@ -1011,12 +819,11 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // Si hay pending
-    if (pending) {
-      // Si dice NO => cancelar
-      if (isNo(userText)) {
-        await clearPending(from);
-        const reply = "Perfecto mi amor 😊 ¿Qué otro producto te interesa ver?";
+    // 4) await_name -> guardar nombre y pedir ubicación por botón
+    if (pending.stage === "await_name") {
+      const name = userText.trim();
+      if (name.length < 3) {
+        const reply = "Mi amor 💗\nDime tu *nombre completo* porfa 😊";
         if (!(await preventSameReply(from, reply))) {
           await appendToMemory(from, "assistant", reply);
           await sendWhatsAppMessage(from, reply);
@@ -1024,12 +831,44 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // Si está esperando confirmación y dice SI => pedir nombre
-      if (pending.stage === "await_confirm" && isYes(userText)) {
-        pending.stage = "await_name";
-        await setPending(from, pending);
+      pending.name = name;
+      pending.stage = "await_location";
+      await setPending(from, pending);
 
-        const reply = "Perfecto 💗\nDime tu *nombre completo* para el envío 😊";
+      // guardar profile
+      profile = profile || {};
+      profile.name = name;
+      await setProfile(from, profile);
+
+      // pedir ubicación botón
+      await sendWhatsAppLocationRequest(from);
+
+      const reply =
+        "Perfecto ✅\nEscríbeme solo una *referencia* (Ej: edificio, apto o punto cerca) 💗";
+      if (!(await preventSameReply(from, reply))) {
+        await appendToMemory(from, "assistant", reply);
+        await sendWhatsAppMessage(from, reply);
+      }
+      return res.sendStatus(200);
+    }
+
+    // 5) await_location -> aquí esperamos el location message (se maneja arriba)
+    if (pending.stage === "await_location") {
+      const reply =
+        "📍 Mi amor, envíame tu ubicación tocando el botón de WhatsApp (Enviar ubicación) 💗";
+      if (!(await preventSameReply(from, reply))) {
+        await appendToMemory(from, "assistant", reply);
+        await sendWhatsAppLocationRequest(from);
+        await sendWhatsAppMessage(from, reply);
+      }
+      return res.sendStatus(200);
+    }
+
+    // 6) await_reference -> guardar referencia y pedir método de pago
+    if (pending.stage === "await_reference") {
+      const ref = userText.trim();
+      if (ref.length < 3) {
+        const reply = "Dime una referencia cortita porfa 😊 (Ej: Edificio L, apto 3B)";
         if (!(await preventSameReply(from, reply))) {
           await appendToMemory(from, "assistant", reply);
           await sendWhatsAppMessage(from, reply);
@@ -1037,15 +876,50 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // Si esperan nombre
-      if (pending.stage === "await_name") {
-        // guardar nombre
-        pending.name = userText;
-        pending.stage = "await_address";
-        await setPending(from, pending);
+      pending.reference = ref;
+      pending.stage = "await_payment";
+      await setPending(from, pending);
 
+      const reply = "Listo ✅\n¿El pago será *contra entrega* o *transferencia*? 😊";
+      if (!(await preventSameReply(from, reply))) {
+        await appendToMemory(from, "assistant", reply);
+        await sendWhatsAppMessage(from, reply);
+      }
+      return res.sendStatus(200);
+    }
+
+    // 7) await_payment -> guardar pago y mostrar resumen (confirmación)
+    if (pending.stage === "await_payment") {
+      if (!isPaymentMessage(userText)) {
+        const reply = "Mi amor 😊\n¿Será *contra entrega* o *transferencia*?";
+        if (!(await preventSameReply(from, reply))) {
+          await appendToMemory(from, "assistant", reply);
+          await sendWhatsAppMessage(from, reply);
+        }
+        return res.sendStatus(200);
+      }
+
+      pending.payment = userText.trim();
+      pending.stage = "await_confirm";
+      await setPending(from, pending);
+
+      const { lines, total } = makeOrderSummary(pending.items);
+
+      const reply =
+        `Perfecto mi amor ✅\n🛒 Tu pedido:\n${lines.join("\n")}\n\n💰 Total: RD$${total}\n¿Confirmas para procesarlo? 😊`;
+
+      if (!(await preventSameReply(from, reply))) {
+        await appendToMemory(from, "assistant", reply);
+        await sendWhatsAppMessage(from, reply);
+      }
+      return res.sendStatus(200);
+    }
+
+    // 8) await_confirm -> confirmar y mandar al admin
+    if (pending.stage === "await_confirm") {
+      if (!isYes(userText)) {
         const reply =
-          "Gracias mi amor 😊\nAhora dime tu *ciudad + sector* y tu *dirección* (con una referencia).";
+          "Dime *sí* para confirmarlo ✅ o dime qué quieres cambiar 😊";
         if (!(await preventSameReply(from, reply))) {
           await appendToMemory(from, "assistant", reply);
           await sendWhatsAppMessage(from, reply);
@@ -1053,159 +927,58 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // Si esperan dirección
-      if (pending.stage === "await_address") {
-        pending.address = userText;
-        pending.stage = "await_payment";
-        await setPending(from, pending);
+      const { lines, total } = makeOrderSummary(pending.items);
+      const loc = await getLastLocation(from);
 
-        const reply = "Listo 💗\n¿El pago será *contra entrega* o *transferencia*? 😊";
-        if (!(await preventSameReply(from, reply))) {
-          await appendToMemory(from, "assistant", reply);
-          await sendWhatsAppMessage(from, reply);
-        }
-        return res.sendStatus(200);
+      // mensaje al cliente
+      const customerReply =
+        "✅ Listo mi amor 💗\nTu pedido fue procesado. En un momentico te confirmamos el envío 😊";
+
+      if (!(await preventSameReply(from, customerReply))) {
+        await appendToMemory(from, "assistant", customerReply);
+        await sendWhatsAppMessage(from, customerReply);
       }
 
-      // Si esperan pago
-      if (pending.stage === "await_payment") {
-        pending.payment = userText;
-        pending.stage = "done";
-        await setPending(from, pending);
+      // mensaje al admin
+      let adminText = `📦 ${ORDER_TAG}\n`;
+      adminText += `👤 Cliente: ${pending.name || "N/A"}\n`;
+      adminText += `📲 WhatsApp: ${from}\n`;
+      adminText += `🛒 Pedido:\n${lines.join("\n")}\n`;
+      adminText += `💰 Total catálogo: RD$${total}\n`;
+      adminText += `💳 Pago: ${pending.payment || "N/A"}\n`;
+      adminText += `🧭 Referencia: ${pending.reference || "N/A"}\n`;
+      adminText += `🔗 Chat: https://wa.me/${from}\n`;
 
-        // total catálogo
-        const total = calcTotal(pending.items);
-
-        const prodLines = pending.items
-          .map((it) => {
-            const p = PRODUCTS.find((x) => x.id === it.productId);
-            if (!p) return `- ${it.qty}x ${it.nameExact}`;
-            return `- ${it.qty}x ${p.name} — RD$${p.price}`;
-          })
-          .join("\n");
-
-        const reply =
-          `Perfecto mi amor ✅\n🛒 Tu pedido:\n${prodLines}\n💰 Total: RD$${total}\n¿Confirmas para procesarlo? 😊`;
-
-        if (!(await preventSameReply(from, reply))) {
-          await appendToMemory(from, "assistant", reply);
-          await sendWhatsAppMessage(from, reply);
-        }
-
-        // Si confirma con SI luego, aquí lo capturamos en la próxima interacción
-        return res.sendStatus(200);
+      if (loc?.latitude && loc?.longitude) {
+        adminText += `\n📍 Ubicación:\n`;
+        adminText += `Lat: ${loc.latitude}, Lon: ${loc.longitude}\n`;
+        adminText += `Maps: https://www.google.com/maps?q=${loc.latitude},${loc.longitude}\n`;
+        if (loc.address) adminText += `Dirección (mapa): ${loc.address}\n`;
+        if (loc.name) adminText += `Nombre (mapa): ${loc.name}\n`;
       }
 
-      // Si ya está done y dice SI => enviar al admin y cerrar
-      if (pending.stage === "done" && isYes(userText)) {
-        // pedido confirmado
-        const loc = await getLastLocation(from);
+      await sendWhatsAppMessage(ADMIN_PHONE, adminText);
 
-        const total = calcTotal(pending.items);
-        const orderJson = buildOrderJson(pending);
+      // limpiar pending
+      await clearPending(from);
 
-        let adminText = `📦 NUEVO PEDIDO CONFIRMADO - Glowny Essentials\n\n`;
-        adminText += `👤 Cliente: ${pending.name || ""}\n`;
-        adminText += `📍 Dirección: ${pending.address || ""}\n`;
-        adminText += `💳 Pago: ${pending.payment || ""}\n\n`;
-        adminText += `🛒 Productos:\n`;
-
-        for (const it of pending.items) {
-          const p = PRODUCTS.find((x) => x.id === it.productId);
-          if (!p) {
-            adminText += `- ${it.qty}x ${it.nameExact}\n`;
-            continue;
-          }
-          adminText += `- ${it.qty}x ${p.name} — RD$${p.price}\n`;
-        }
-
-        adminText += `\n💰 Total catálogo: RD$${total}\n\n`;
-        adminText += `Número del cliente: ${from}\nChat: https://wa.me/${from}\n\n`;
-        adminText += `${ORDER_TAG}\n${JSON.stringify(orderJson, null, 2)}\n`;
-
-        if (loc?.latitude && loc?.longitude) {
-          adminText += `\n📍 Ubicación mapa:\nLat: ${loc.latitude}, Lon: ${loc.longitude}\n`;
-          adminText += `Google Maps: https://www.google.com/maps?q=${loc.latitude},${loc.longitude}\n`;
-          if (loc.address) adminText += `Dirección aprox: ${loc.address}\n`;
-          if (loc.name) adminText += `Nombre: ${loc.name}\n`;
-        }
-
-        await sendWhatsAppMessage(ADMIN_PHONE, adminText);
-
-        const reply = "Listo mi amor ✅ Ya tu pedido está confirmado 💗\nEn breve te lo estaremos entregando 😊";
-        if (!(await preventSameReply(from, reply))) {
-          await appendToMemory(from, "assistant", reply);
-          await sendWhatsAppMessage(from, reply);
-        }
-
-        await clearPending(from);
-        return res.sendStatus(200);
-      }
-
-      // Si está done y dice NO => reiniciar
-      if (pending.stage === "done" && isNo(userText)) {
-        pending.stage = "await_confirm";
-        await setPending(from, pending);
-
-        const reply = "Dime qué deseas cambiar mi amor 😊 (cantidad o producto)";
-        if (!(await preventSameReply(from, reply))) {
-          await appendToMemory(from, "assistant", reply);
-          await sendWhatsAppMessage(from, reply);
-        }
-        return res.sendStatus(200);
-      }
+      return res.sendStatus(200);
     }
 
-    // =========================
-    // Si NO hay producto detectado, pero hay "colágeno" => responder directo
-    // =========================
-    if (!matchedProduct) {
-      const q = normalizeText(userText);
-      if (q.includes("colageno") || q.includes("colágeno")) {
-        const prod = PRODUCTS.find((p) => normalizeText(p.name).includes("colageno"));
-        if (prod) {
-          await setLastProduct(from, prod.id);
-
-          const reply = `Tengo este 💗\n${prod.name}\nPrecio: RD$${prod.price} c/u\n¿Te reservo 1 unidad? 😊`;
-          if (!(await preventSameReply(from, reply))) {
-            await appendToMemory(from, "assistant", reply);
-            await sendWhatsAppMessage(from, reply);
-          }
-          return res.sendStatus(200);
-        }
-      }
+    // =============================
+    // E) FALLBACK OPENAI (si algo extraño)
+    // =============================
+    const ai = await callOpenAI(from, userText);
+    if (!(await preventSameReply(from, ai))) {
+      await sendWhatsAppMessage(from, ai);
     }
-
-    // =========================
-    // Fallback OpenAI (solo si no pudo resolver)
-    // =========================
-    const lastPid = await getLastProduct(from);
-    const prodContext = lastPid ? PRODUCTS.find((p) => p.id === lastPid) : null;
-
-    const aiReply = await callOpenAI({
-      waNumber: from,
-      userText,
-      pending: pending || null,
-      productContext: prodContext || null,
-    });
-
-    // evitar spam
-    if (!(await preventSameReply(from, aiReply))) {
-      await appendToMemory(from, "assistant", aiReply);
-      await sendWhatsAppMessage(from, aiReply);
-    }
-
     return res.sendStatus(200);
   } catch (err) {
-    console.error("Error en /webhook:", err);
+    console.error("Error webhook:", err);
     return res.sendStatus(200);
   }
 });
 
-// =========================
-// Start server
-// =========================
+// =============================
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`🚀 Bot corriendo en puerto ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Bot corriendo en puerto ${PORT}`));
