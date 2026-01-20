@@ -78,6 +78,7 @@ function loadCatalog() {
   CATALOG_OK = PRODUCTS.length > 3;
 
   if (!CATALOG_OK) {
+    // SIN catalogo -> NO dejamos que OpenAI invente cosas
     PRODUCTS = [];
     console.log("⚠️ Catálogo NO cargado. Se bloqueará el modo AI.");
     return;
@@ -135,67 +136,10 @@ const K = {
   state: (wa) => `glowny:state:${wa}`,
   lastprod: (wa) => `glowny:lastprod:${wa}`,
   lock: (wa) => `glowny:lock:${wa}`,
+
+  // ✅ guardamos info del anuncio por si quieres revisarla después
+  adref: (wa) => `glowny:adref:${wa}`,
 };
-
-// =============================
-// HELPERS
-// =============================
-function money(n) {
-  return `RD$${Number(n || 0).toLocaleString("en-US")}`;
-}
-
-function getProductById(id) {
-  if (!CATALOG_OK) return null;
-  return PRODUCTS.find((p) => p.id === id) || null;
-}
-
-function extractSizeFromName(name = "") {
-  const t = name;
-  // 250 g / 400 ml / 30ml / 1L etc
-  const m =
-    t.match(/(\d{2,4})\s?(g|gr|ml|l)\b/i) ||
-    t.match(/\b(\d{1,2})\s?(l)\b/i);
-  if (!m) return "";
-  return `${m[1]} ${m[2].toLowerCase()}`.replace("gr", "g");
-}
-
-function estimateServingsIfPossible(prodName = "", sizeStr = "") {
-  // Solo si tiene gramos (suplementos)
-  const n = normalizeText(prodName);
-  const looksSupplement =
-    n.includes("colageno") ||
-    n.includes("colágeno") ||
-    n.includes("magnesio") ||
-    n.includes("vitamina") ||
-    n.includes("complemento alimenticio") ||
-    n.includes("capsula") ||
-    n.includes("cápsula") ||
-    n.includes("polvo");
-
-  if (!looksSupplement) return null;
-  if (!sizeStr) return null;
-
-  const m = sizeStr.match(/(\d{2,4})\s*g/i);
-  if (!m) return null;
-
-  const grams = Number(m[1]);
-  if (!grams || grams < 50) return null;
-
-  // Estimación realista sin inventar exacto: 8–10g por porción
-  const minServing = 8;
-  const maxServing = 10;
-
-  const minServings = Math.floor(grams / maxServing);
-  const maxServings = Math.floor(grams / minServing);
-
-  return {
-    grams,
-    minServings,
-    maxServings,
-    servingRange: `${minServing}-${maxServing}g`,
-    weeksApprox: "3–4 semanas aprox",
-  };
-}
 
 // =============================
 // PRODUCT MATCHING (100%)
@@ -215,6 +159,7 @@ function findProducts(query) {
 
       if (p.normName.includes(q)) score += 10;
 
+      // hits por palabras
       const hits = qWords.filter((w) => p.wordSet.has(w)).length;
       score += hits;
 
@@ -224,6 +169,15 @@ function findProducts(query) {
     .sort((a, b) => b.score - a.score);
 
   return scored.slice(0, 3).map((x) => x.p);
+}
+
+function getProductById(id) {
+  if (!CATALOG_OK) return null;
+  return PRODUCTS.find((p) => p.id === id) || null;
+}
+
+function money(n) {
+  return `RD$${Number(n || 0).toLocaleString("en-US")}`;
 }
 
 // =============================
@@ -239,9 +193,7 @@ function isConfirmYes(text) {
     q.includes("ok") ||
     q.includes("perfecto") ||
     q.includes("confirmo") ||
-    q.includes("confirmar") ||
-    q.includes("de acuerdo") ||
-    q === "s"
+    q.includes("confirmar")
   );
 }
 
@@ -254,11 +206,7 @@ function isOrderIntent(text) {
     q.includes("confirmar el pedido") ||
     q.includes("confirmo el pedido") ||
     q.includes("ordenar") ||
-    q.includes("reservar") ||
-    q.includes("lo quiero") ||
-    q.includes("lo deseo") ||
-    q.includes("comprarlo") ||
-    q.includes("comprar")
+    q.includes("reservar")
   );
 }
 
@@ -273,107 +221,95 @@ function extractQty(text) {
 
 function extractPayment(text) {
   const q = normalizeText(text);
-  if (q.includes("contra entrega") || q.includes("efectivo")) return "Contra entrega";
+  if (q.includes("contra entrega") || q.includes("efectivo"))
+    return "Contra entrega";
   if (q.includes("transfer")) return "Transferencia";
   return null;
 }
 
 function isAskingForImage(text) {
   const q = normalizeText(text);
-  return q.includes("foto") || q.includes("imagen") || q.includes("muestrame") || q.includes("ver");
+  return (
+    q.includes("foto") ||
+    q.includes("imagen") ||
+    q.includes("muestrame") ||
+    q.includes("ver")
+  );
 }
 
-function isGeneralGreeting(text) {
+// ✅ detectar saludo / entrada genérica típica desde anuncios
+function isGreeting(text) {
   const q = normalizeText(text);
-  return q === "hola" || q === "buenas" || q === "buenos dias" || q === "buenas tardes" || q === "buenas noches";
-}
-
-// ✅ Detecta preguntas “raras” o de info del producto
-function isProductQuestion(text) {
-  const q = normalizeText(text);
-  if (!q) return false;
-
-  const triggers = [
-    "como se usa",
-    "como lo uso",
-    "modo de uso",
-    "para que sirve",
-    "beneficios",
-    "funciona",
-    "que hace",
-    "que es",
-    "es bueno",
-    "sirve para",
-    "tamaño",
-    "de que tamaño",
-    "cuantos gramos",
-    "cuantos ml",
-    "gramos",
-    "ml",
-    "duracion",
-    "cuanto dura",
-    "rinde",
-    "rendimiento",
-    "scoop",
-    "porciones",
-    "ingredientes",
-    "contraindicacion",
-    "embarazo",
-    "piel",
-    "cabello",
-    "manchas",
-    "acne",
-    "para manchas",
-    "para estrias",
-    "como aplico",
-    "cada cuanto",
-    "cuantas veces",
-    "cuando usar",
-    "de dia",
-    "de noche",
-  ];
-
-  // Si tiene signo de pregunta o frases comunes
-  if (q.includes("?")) return true;
-
-  return triggers.some((t) => q.includes(t));
+  return (
+    q === "" ||
+    q === "hola" ||
+    q.includes("buenas") ||
+    q.includes("buenos dias") ||
+    q.includes("buenas tardes") ||
+    q.includes("buenas noches") ||
+    q === "hi"
+  );
 }
 
 // =============================
-// OPENAI (Responde bien preguntas raras)
+// OPENAI (SOLO si de verdad es necesario)
 // =============================
+function shouldUseOpenAI(text) {
+  // ❌ si no hay catálogo, NO usar
+  if (!CATALOG_OK) return false;
+
+  const q = normalizeText(text);
+
+  // ❌ si parece pedido/producto, no usar
+  if (
+    q.includes("precio") ||
+    q.includes("quiero") ||
+    q.includes("necesito") ||
+    q.includes("colageno") ||
+    q.includes("serum") ||
+    q.includes("crema") ||
+    q.includes("aceite") ||
+    q.includes("envio") ||
+    q.includes("ubicacion") ||
+    isOrderIntent(text)
+  ) {
+    return false;
+  }
+
+  // ✅ si es totalmente fuera del tema
+  return true;
+}
+
 function getSystemPrompt() {
   return `
 Eres una asistente de ventas por WhatsApp de "Glowny Essentials" en República Dominicana.
 
-OBJETIVO:
-- Responder dudas del cliente sobre productos de forma útil.
-- Luego, siempre guiar a continuar el pedido.
-
 REGLAS OBLIGATORIAS:
-- NO uses la frase "mi amor".
-- Usa tono amable con emojis (máximo 1-2 emojis).
-- Responde máximo 2 a 4 líneas.
+- Responde 1 a 3 líneas, corto y directo.
+- No uses la frase "mi amor".
+- Usa emojis sutiles (💗✨😊) para que se sienta femenino y amable, sin exagerar.
+- Nunca digas "contacta al equipo de ventas", "visita la web", "soporte", ni nada parecido.
 - No inventes precios ni productos.
-- Si no tienes un dato exacto (ej: scoop exacto), dilo con honestidad y da una guía útil (ej: rango aproximado si aplica).
-- NO digas "contacta al equipo", "visita la web", "soporte".
-- SIEMPRE termina con una pregunta para avanzar el pedido:
-  - "¿Te lo reservo?"
-  - "¿Cuántos deseas?"
-  - "¿Quieres pedirlo ahora?"
+- Si el cliente pregunta algo raro, responde amable y llévalo al catálogo.
 `;
 }
 
-async function callOpenAI(messages) {
+async function callOpenAI(history, userText) {
   if (!OPENAI_API_KEY) {
-    return "Claro 😊 ¿Cuál producto deseas y cuántos quieres?";
+    return "¡Hola! 😊 Dime qué producto deseas y te ayudo.";
   }
+
+  const messages = [
+    { role: "system", content: getSystemPrompt() },
+    ...history,
+    { role: "user", content: userText },
+  ];
 
   const payload = {
     model: MODEL,
     messages,
     temperature: 0.2,
-    max_tokens: 180,
+    max_tokens: 160,
   };
 
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -395,107 +331,10 @@ async function callOpenAI(messages) {
     return "Ahora mismo tuve un error 😥 ¿Me lo repites?";
   }
 
-  return data.choices?.[0]?.message?.content?.trim() || "Claro 😊 ¿Te lo reservo?";
-}
-
-// ✅ Decide el cierre correcto según el estado del pedido
-function getCTAByState(st) {
-  if (!st) return "¿Te lo reservo? 😊";
-  if (st.step === "ASK_QTY") return "¿Cuántos deseas? 😊";
-  if (st.step === "ASK_LOCATION") return "Para continuar, envíame tu ubicación 📍";
-  if (st.step === "ASK_REFERENCE") return "Dime una referencia breve (ej: cerca del colmado) 😊";
-  if (st.step === "ASK_PAYMENT") return "¿Contra entrega o transferencia? 😊";
-  if (st.step === "CONFIRM") return "¿Confirmas para procesarlo? 😊";
-  return "¿Te lo reservo? 😊";
-}
-
-// ✅ Producto en contexto: el seleccionado o el último preguntado
-async function getContextProduct(from, st) {
-  if (st?.productId) {
-    const p = getProductById(st.productId);
-    if (p) return p;
-  }
-  const last = await redisGet(K.lastprod(from));
-  if (last) {
-    const p = getProductById(last);
-    if (p) return p;
-  }
-  return null;
-}
-
-// ✅ Responder preguntas del producto con IA y contexto real del catálogo
-async function answerProductQuestionWithAI(from, st, userText) {
-  const prod = await getContextProduct(from, st);
-  if (!prod) return null;
-
-  const size = prod.size || extractSizeFromName(prod.name) || "";
-  const usage = prod.usage || "";
-  const duration = prod.duration || "";
-  const notes = prod.notes || "";
-  const ingredients = prod.ingredients || "";
-  const category = prod.category || "";
-
-  // Estimación útil solo si aplica (suplementos)
-  const est = estimateServingsIfPossible(prod.name, size);
-  const estText = est
-    ? `Estimación útil: Con ${est.grams}g suele salir aprox ${est.minServings}-${est.maxServings} porciones.`
-    : "";
-
-  const context = `
-PRODUCTO ACTUAL (NO INVENTAR):
-- Nombre: ${prod.name}
-- Precio: ${money(prod.price)}
-- Categoría: ${category || "No especificada"}
-- Tamaño/Presentación: ${size || "No especificado"}
-- Modo de uso (si existe): ${usage || "No especificado"}
-- Rendimiento/Duración (si existe): ${duration || "No especificado"}
-- Ingredientes (si existe): ${ingredients || "No especificado"}
-- Notas (si existe): ${notes || "No especificado"}
-${estText ? `- ${estText}` : ""}
-`;
-
-  const cta = getCTAByState(st);
-
-  const messages = [
-    { role: "system", content: getSystemPrompt() },
-    { role: "system", content: context },
-    {
-      role: "user",
-      content: `
-Pregunta del cliente: "${userText}"
-
-Responde útil y claro basado en el contexto.
-Al final incluye esta guía para continuar el pedido: "${cta}"
-`,
-    },
-  ];
-
-  return await callOpenAI(messages);
-}
-
-// ✅ OpenAI solo si es fuera del tema del pedido
-function shouldUseOpenAIForOffTopic(text) {
-  if (!CATALOG_OK) return false;
-  const q = normalizeText(text);
-
-  // Si parece pedido o producto, NO usar off-topic AI
-  if (
-    q.includes("precio") ||
-    q.includes("quiero") ||
-    q.includes("necesito") ||
-    q.includes("envio") ||
-    q.includes("ubicacion") ||
-    q.includes("dirección") ||
-    isOrderIntent(text)
-  ) {
-    return false;
-  }
-
-  // Si es saludo simple, no hace falta AI
-  if (isGeneralGreeting(text)) return false;
-
-  // ✅ si es totalmente fuera del catálogo (preguntas random)
-  return true;
+  return (
+    data.choices?.[0]?.message?.content?.trim() ||
+    "¿Qué producto deseas? 😊"
+  );
 }
 
 // =============================
@@ -598,6 +437,29 @@ async function saveMemory(wa, history) {
 }
 
 // =============================
+// ✅ EXTRAER REFERENCIA DE ANUNCIO (headline/body)
+// =============================
+function extractAdReferral(message) {
+  const ref = message?.context?.referral || message?.referral || null;
+  if (!ref) return null;
+
+  const headline = ref?.headline || "";
+  const body = ref?.body || "";
+  const sourceType = ref?.source_type || "";
+  const sourceId = ref?.source_id || "";
+
+  const adText = `${headline} ${body}`.trim();
+
+  return {
+    sourceType,
+    sourceId,
+    headline,
+    body,
+    adText,
+  };
+}
+
+// =============================
 // MAIN WEBHOOK
 // =============================
 app.post("/webhook", async (req, res) => {
@@ -622,7 +484,7 @@ app.post("/webhook", async (req, res) => {
     if (!CATALOG_OK) {
       await sendWhatsAppMessage(
         from,
-        "Ahora mismo estoy actualizando el catálogo 😥\nEscríbeme en 1 minutico porfa 🙏"
+        "Hola 😊 ahora mismo estoy actualizando el catálogo 😥\nEscríbeme en 1 minutico porfa 🙏"
       );
       await redisDel(lockKey);
       return res.sendStatus(200);
@@ -643,7 +505,10 @@ app.post("/webhook", async (req, res) => {
       if (st.step === "ASK_LOCATION") st.step = "ASK_REFERENCE";
       await setState(from, st);
 
-      await sendWhatsAppMessage(from, "Perfecto ✅ Ahora dime una referencia breve (Ej: “cerca del colmado”).");
+      await sendWhatsAppMessage(
+        from,
+        "Perfecto ✅ Ahora dime una referencia breve (Ej: “cerca del colmado”)."
+      );
       await redisDel(lockKey);
       return res.sendStatus(200);
     } else {
@@ -652,18 +517,33 @@ app.post("/webhook", async (req, res) => {
 
     const st = await getState(from);
 
-    // =============================
-    // 0) Si es saludo -> respuesta simple
-    // =============================
-    if (isGeneralGreeting(userText)) {
-      await sendWhatsAppMessage(from, "¡Hola! 😊 ¿Qué producto estás buscando hoy?");
-      await redisDel(lockKey);
-      return res.sendStatus(200);
+    // ✅ Si viene desde anuncio, detectar producto por headline/body
+    const adRef = extractAdReferral(message);
+
+    if (adRef && (adRef.adText || adRef.sourceId)) {
+      await redisSet(K.adref(from), adRef, 60 * 60 * 24);
+
+      const adMatches = findProducts(adRef.adText);
+
+      if (!st.productId && adMatches.length === 1) {
+        const prod = adMatches[0];
+
+        st.productId = prod.id;
+        await redisSet(K.lastprod(from), prod.id);
+        await setState(from, st);
+
+        if (isGreeting(userText)) {
+          await sendWhatsAppMessage(
+            from,
+            `¡Hola! 😊💗\n${prod.name}\nPrecio: ${money(prod.price)}\n¿Te lo reservo?`
+          );
+          await redisDel(lockKey);
+          return res.sendStatus(200);
+        }
+      }
     }
 
-    // =============================
     // 1) Detectar producto por texto
-    // =============================
     const matches = findProducts(userText);
 
     if (matches.length === 1) {
@@ -671,51 +551,45 @@ app.post("/webhook", async (req, res) => {
       st.productId = prod.id;
       await redisSet(K.lastprod(from), prod.id);
 
-      // Si pide imagen
-      if (isAskingForImage(userText) && prod.image) {
+      // si el user quiere pedir o confirmar, avanzar directo
+      if (
+        isOrderIntent(userText) ||
+        normalizeText(userText).includes("quiero") ||
+        normalizeText(userText).includes("necesito")
+      ) {
+        st.step = "ASK_QTY";
         await setState(from, st);
-        await sendWhatsAppImage(
+        await sendWhatsAppMessage(
           from,
-          prod.image,
-          `${prod.name}\nPrecio: ${money(prod.price)}\n¿Quieres reservarlo? 😊`
+          `Tengo ese 💗\n${prod.name}\nPrecio: ${money(
+            prod.price
+          )} c/u\n¿Cuántos deseas? 😊`
         );
         await redisDel(lockKey);
         return res.sendStatus(200);
       }
 
-      // Si quiere pedir directo
-      if (isOrderIntent(userText) || normalizeText(userText).includes("quiero") || normalizeText(userText).includes("necesito")) {
-        st.step = "ASK_QTY";
-        await setState(from, st);
-        await sendWhatsAppMessage(from, `Perfecto ✅\n${prod.name}\nPrecio: ${money(prod.price)} c/u\n¿Cuántos deseas? 😊`);
+      await setState(from, st);
+
+      if (isAskingForImage(userText) && prod.image) {
+        await sendWhatsAppImage(
+          from,
+          prod.image,
+          `${prod.name}\nPrecio: ${money(prod.price)}\n¿Lo quieres para pedirlo? 💗`
+        );
         await redisDel(lockKey);
         return res.sendStatus(200);
       }
 
-      await setState(from, st);
-      await sendWhatsAppMessage(from, `✅ ${prod.name}\nPrecio: ${money(prod.price)}\n¿Te lo reservo? 😊`);
+      await sendWhatsAppMessage(
+        from,
+        `¡Claro! 💗\n${prod.name}\nPrecio: ${money(prod.price)}\n¿Te lo reservo? 😊`
+      );
       await redisDel(lockKey);
       return res.sendStatus(200);
     }
 
-    // =============================
-    // 2) Si pregunta algo del producto y ya hay producto en contexto -> IA RESPONDE
-    // =============================
-    if (isProductQuestion(userText)) {
-      const prodCtx = await getContextProduct(from, st);
-      if (prodCtx) {
-        const ai = await answerProductQuestionWithAI(from, st, userText);
-        if (ai) {
-          await sendWhatsAppMessage(from, ai);
-          await redisDel(lockKey);
-          return res.sendStatus(200);
-        }
-      }
-    }
-
-    // =============================
-    // 3) Si dice confirmar pedido pero no hay product seleccionado -> usar el lastprod
-    // =============================
+    // 2) Si dice confirmar pedido pero no hay product seleccionado -> usar el lastprod
     if (isOrderIntent(userText) && !st.productId) {
       const last = await redisGet(K.lastprod(from));
       if (last) {
@@ -725,16 +599,19 @@ app.post("/webhook", async (req, res) => {
 
         const prod = getProductById(last);
         if (prod) {
-          await sendWhatsAppMessage(from, `Perfecto ✅\n${prod.name}\nPrecio: ${money(prod.price)}\n¿Cuántos deseas? 😊`);
+          await sendWhatsAppMessage(
+            from,
+            `Perfecto 💗\n${prod.name}\nPrecio: ${money(
+              prod.price
+            )}\n¿Cuántos deseas? 😊`
+          );
           await redisDel(lockKey);
           return res.sendStatus(200);
         }
       }
     }
 
-    // =============================
-    // 4) Flujo por estado
-    // =============================
+    // 3) Flujo por estado
     if (isConfirmYes(userText) && st.productId && st.step === "IDLE") {
       st.step = "ASK_QTY";
       await setState(from, st);
@@ -800,7 +677,9 @@ app.post("/webhook", async (req, res) => {
 
       await sendWhatsAppMessage(
         from,
-        `Perfecto ✅\n🛒 Tu pedido:\n- ${st.qty}x ${prod.name}\n💰 Total: ${money(total)}\n¿Confirmas para procesarlo? 😊`
+        `Perfecto ✅\n🛒 Tu pedido:\n- ${st.qty}x ${prod.name}\n💰 Total: ${money(
+          total
+        )}\n¿Confirmas para procesarlo? 😊`
       );
       await redisDel(lockKey);
       return res.sendStatus(200);
@@ -810,7 +689,7 @@ app.post("/webhook", async (req, res) => {
       const prod = getProductById(st.productId);
       const total = prod.price * st.qty;
 
-      await sendWhatsAppMessage(from, "Listo ✅\nTu pedido quedó confirmado.\nEn breve te lo coordinamos 😊");
+      await sendWhatsAppMessage(from, "Listo 💗✅\nTu pedido quedó confirmado.\nEn breve te lo coordinamos 😊");
 
       // admin
       let adminText = `📦 NUEVO PEDIDO CONFIRMADO - Glowny Essentials\n\n`;
@@ -832,31 +711,20 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // =============================
-    // 5) Si pregunta imagen y ya hay producto seleccionado
-    // =============================
+    // 4) Si pregunta imagen y ya hay producto seleccionado
     if (isAskingForImage(userText) && st.productId) {
       const prod = getProductById(st.productId);
       if (prod?.image) {
-        await sendWhatsAppImage(from, prod.image, `${prod.name}\nPrecio: ${money(prod.price)} 😊`);
+        await sendWhatsAppImage(from, prod.image, `${prod.name}\nPrecio: ${money(prod.price)} 💗`);
         await redisDel(lockKey);
         return res.sendStatus(200);
       }
     }
 
-    // =============================
-    // 6) OpenAI para mensajes fuera del tema (random)
-    // =============================
-    if (shouldUseOpenAIForOffTopic(userText)) {
+    // 5) OpenAI solo si es fuera del tema
+    if (shouldUseOpenAI(userText)) {
       const history = await getMemory(from);
-
-      const messages = [
-        { role: "system", content: getSystemPrompt() },
-        ...history,
-        { role: "user", content: userText },
-      ];
-
-      const ai = await callOpenAI(messages);
+      const ai = await callOpenAI(history, userText);
 
       const newHistory = [
         ...history,
@@ -870,10 +738,8 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // =============================
-    // 7) Respuesta por defecto (sin AI)
-    // =============================
-    await sendWhatsAppMessage(from, "Dime el nombre del producto y te digo precio 😊");
+    // 6) Respuesta por defecto (sin AI)
+    await sendWhatsAppMessage(from, "Dime el nombre del producto y te digo el precio 😊💗");
     await redisDel(lockKey);
     return res.sendStatus(200);
   } catch (err) {
