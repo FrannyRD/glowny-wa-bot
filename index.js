@@ -138,7 +138,7 @@ const K = {
 };
 
 // =============================
-// PRODUCT MATCHING (100%)
+// PRODUCT MATCHING
 // =============================
 function findProducts(query) {
   if (!CATALOG_OK) return [];
@@ -155,7 +155,6 @@ function findProducts(query) {
 
       if (p.normName.includes(q)) score += 10;
 
-      // hits por palabras
       const hits = qWords.filter((w) => p.wordSet.has(w)).length;
       score += hits;
 
@@ -177,7 +176,7 @@ function money(n) {
 }
 
 // =============================
-// ✅ NUEVO: PREGUNTA DE TAMAÑO
+// ✅ PREGUNTAS DE TAMAÑO / USO / DURACIÓN / BENEFICIOS
 // =============================
 function isSizeQuestion(text) {
   const q = normalizeText(text);
@@ -193,33 +192,10 @@ function isSizeQuestion(text) {
     q.includes("cuanto trae") ||
     q.includes("que tamano") ||
     q.includes("de que tamaño") ||
-    q.includes("de cuantos") ||
-    q.includes("g ") ||
-    q.includes("ml ")
+    q.includes("de cuantos")
   );
 }
 
-function extractSizeFromName(productName = "") {
-  const t = productName;
-
-  // ejemplo: "250 g", "250g"
-  let m = t.match(/(\d{2,4})\s?(g|gr|gramos)\b/i);
-  if (m) return `${m[1]} g`;
-
-  // ejemplo: "400 ml", "400ml"
-  m = t.match(/(\d{2,4})\s?(ml|mililitros)\b/i);
-  if (m) return `${m[1]} ml`;
-
-  // ejemplo: "30 cápsulas"
-  m = t.match(/(\d{1,3})\s?(capsulas|cápsulas|caps)\b/i);
-  if (m) return `${m[1]} cápsulas`;
-
-  return null;
-}
-
-// =============================
-// ✅ NUEVO: PREGUNTA DE USO / COMO SE USA
-// =============================
 function isUsageQuestion(text) {
   const q = normalizeText(text);
   return (
@@ -229,13 +205,62 @@ function isUsageQuestion(text) {
     q.includes("cómo usar") ||
     q.includes("modo de uso") ||
     q.includes("instrucciones") ||
-    q.includes("aplica") ||
     q.includes("se aplica") ||
-    q.includes("cuantas veces") ||
-    q.includes("cuánto se usa") ||
-    q.includes("para que sirve") ||
-    q.includes("para qué sirve")
+    q.includes("cada cuanto") ||
+    q.includes("cada cuánto")
   );
+}
+
+function isDurationQuestion(text) {
+  const q = normalizeText(text);
+  return (
+    q.includes("cuanto dura") ||
+    q.includes("cuánto dura") ||
+    q.includes("para cuantos dias") ||
+    q.includes("para cuántos dias") ||
+    q.includes("para cuantos usos") ||
+    q.includes("para cuántos usos") ||
+    q.includes("rinde") ||
+    q.includes("rendimiento")
+  );
+}
+
+// ✅ cualquier pregunta "de producto" rara (beneficios, sirve, etc.)
+function isGenericProductQuestion(text) {
+  const q = normalizeText(text);
+  return (
+    q.includes("?") ||
+    q.includes("sirve") ||
+    q.includes("para que") ||
+    q.includes("para qué") ||
+    q.includes("beneficio") ||
+    q.includes("ingrediente") ||
+    q.includes("original") ||
+    q.includes("efecto") ||
+    q.includes("reaccion") ||
+    q.includes("reacción") ||
+    q.includes("embarazo") ||
+    q.includes("piel") ||
+    q.includes("manchas") ||
+    q.includes("acne") ||
+    q.includes("acné") ||
+    q.includes("diario") ||
+    q.includes("todos los dias") ||
+    q.includes("tengo")
+  );
+}
+
+function extractSizeFromName(productName = "") {
+  let m = productName.match(/(\d{2,4})\s?(g|gr|gramos)\b/i);
+  if (m) return `${m[1]} g`;
+
+  m = productName.match(/(\d{2,4})\s?(ml|mililitros)\b/i);
+  if (m) return `${m[1]} ml`;
+
+  m = productName.match(/(\d{1,3})\s?(capsulas|cápsulas|caps)\b/i);
+  if (m) return `${m[1]} cápsulas`;
+
+  return null;
 }
 
 // =============================
@@ -297,64 +322,31 @@ function isAskingForImage(text) {
 }
 
 // =============================
-// OPENAI (SOLO si de verdad es necesario)
+// OPENAI
 // =============================
-function shouldUseOpenAI(text) {
-  if (!CATALOG_OK) return false;
-
-  const q = normalizeText(text);
-
-  // si parece pedido/producto -> NO usar
-  if (
-    q.includes("precio") ||
-    q.includes("quiero") ||
-    q.includes("necesito") ||
-    q.includes("colageno") ||
-    q.includes("colágeno") ||
-    q.includes("serum") ||
-    q.includes("crema") ||
-    q.includes("aceite") ||
-    q.includes("envio") ||
-    q.includes("envío") ||
-    q.includes("ubicacion") ||
-    q.includes("ubicación") ||
-    isOrderIntent(text)
-  ) {
-    return false;
-  }
-
-  return true;
-}
-
 function getSystemPrompt() {
   return `
 Eres una asistente de ventas por WhatsApp de "Glowny Essentials" en República Dominicana.
 
-REGLAS OBLIGATORIAS:
-- Responde 1 a 3 líneas, corto y directo.
-- Nunca digas "contacta al equipo de ventas", "visita la web", "soporte", ni nada parecido.
-- No inventes precios ni productos.
-- Si el cliente pregunta algo raro, responde amable y llévalo al pedido.
-- Siempre termina con una pregunta para continuar el pedido: "¿Te lo reservo?" o "¿Cuántos deseas?".
+REGLAS:
+- Responde corto: 1 a 4 líneas máximo.
+- Nunca digas "contacta al equipo", "visita la web", "soporte".
+- No inventes precios, ni inventes productos.
+- Si NO tienes un dato exacto (ej: duración exacta), responde general sin números inventados.
+- SIEMPRE termina con una pregunta para avanzar el pedido: "¿Te lo reservo?" o "¿Cuántos deseas?".
 `;
 }
 
-async function callOpenAI(history, userText) {
+async function callOpenAI(messages) {
   if (!OPENAI_API_KEY) {
-    return "Mi amor dime qué producto quieres y te ayudo 😊";
+    return "Mi amor dime qué producto quieres y te ayudo 😊 ¿Te lo reservo?";
   }
-
-  const messages = [
-    { role: "system", content: getSystemPrompt() },
-    ...history,
-    { role: "user", content: userText },
-  ];
 
   const payload = {
     model: MODEL,
     messages,
     temperature: 0.2,
-    max_tokens: 160,
+    max_tokens: 180,
   };
 
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -376,10 +368,7 @@ async function callOpenAI(history, userText) {
     return "Ahora mismo tuve un error 😥 ¿Me lo repites?";
   }
 
-  return (
-    data.choices?.[0]?.message?.content?.trim() ||
-    "¿Qué producto deseas mi amor? 😊"
-  );
+  return data.choices?.[0]?.message?.content?.trim() || "¿Te lo reservo? 😊";
 }
 
 // =============================
@@ -459,7 +448,7 @@ app.get("/webhook", (req, res) => {
 async function getState(wa) {
   const st = (await redisGet(K.state(wa))) || {};
   return {
-    step: st.step || "IDLE", // IDLE | ASK_QTY | ASK_LOCATION | ASK_REFERENCE | ASK_PAYMENT | CONFIRM
+    step: st.step || "IDLE",
     productId: st.productId || null,
     qty: st.qty || 1,
     location: st.location || null,
@@ -481,7 +470,6 @@ async function saveMemory(wa, history) {
   await redisSet(K.mem(wa), history.slice(-MAX_HISTORY_MESSAGES));
 }
 
-// ✅ helper: traer producto actual o último producto usado
 async function getContextProduct(wa, st) {
   if (st?.productId) {
     const p = getProductById(st.productId);
@@ -493,6 +481,34 @@ async function getContextProduct(wa, st) {
     if (p) return p;
   }
   return null;
+}
+
+// ✅ IA para preguntas raras pero CON CONTEXTO del producto
+async function answerProductQuestionWithAI(from, st, userText) {
+  const prod = await getContextProduct(from, st);
+  if (!prod) return null;
+
+  const size = extractSizeFromName(prod.name) || prod.size || "";
+  const usage = prod.usage || "";
+  const duration = prod.duration || ""; // opcional si lo agregas en el catálogo
+
+  const context = `
+PRODUCTO ACTUAL:
+- Nombre: ${prod.name}
+- Precio: ${money(prod.price)}
+- Tamaño/Presentación: ${size || "No especificado"}
+- Uso: ${usage || "No especificado"}
+- Duración/Rendimiento: ${duration || "No especificado"}
+`;
+
+  const messages = [
+    { role: "system", content: getSystemPrompt() },
+    { role: "system", content: context },
+    { role: "user", content: userText },
+  ];
+
+  const ai = await callOpenAI(messages);
+  return ai;
 }
 
 // =============================
@@ -516,7 +532,7 @@ app.post("/webhook", async (req, res) => {
     if (lock) return res.sendStatus(200);
     await redisSet(lockKey, "1", 2);
 
-    // Si no hay catálogo -> responder fijo
+    // Si no hay catálogo
     if (!CATALOG_OK) {
       await sendWhatsAppMessage(
         from,
@@ -553,58 +569,42 @@ app.post("/webhook", async (req, res) => {
 
     const st = await getState(from);
 
-    // =============================
-    // ✅ FIX #1: SI PREGUNTA TAMAÑO y ya hay producto
-    // =============================
-    if (isSizeQuestion(userText)) {
+    // ✅ 0) Si ya hay producto seleccionado y hacen pregunta rara -> IA con contexto
+    // (Esto evita el “¿a qué producto te refieres?”)
+    const hasProductContext = !!(st.productId || (await redisGet(K.lastprod(from))));
+    if (
+      hasProductContext &&
+      (isDurationQuestion(userText) || isUsageQuestion(userText) || isSizeQuestion(userText) || isGenericProductQuestion(userText)) &&
+      st.step === "IDLE"
+    ) {
+      // primero resolvemos tamaño/uso con reglas rápidas si aplica
       const prod = await getContextProduct(from, st);
 
-      if (prod) {
+      if (prod && isSizeQuestion(userText)) {
         const size = extractSizeFromName(prod.name) || prod.size || null;
-
         if (size) {
           await sendWhatsAppMessage(
             from,
             `Es de ${size} 💗\nPrecio: ${money(prod.price)}\n¿Te lo reservo? 😊`
           );
-        } else {
-          await sendWhatsAppMessage(
-            from,
-            `Mi amor es esta presentación:\n${prod.name}\nPrecio: ${money(
-              prod.price
-            )}\n¿Te lo reservo? 😊`
-          );
+          await redisDel(lockKey);
+          return res.sendStatus(200);
         }
+      }
 
+      if (prod && isUsageQuestion(userText) && prod.usage) {
+        await sendWhatsAppMessage(
+          from,
+          `${prod.usage}\n¿Te lo reservo? 😊`
+        );
         await redisDel(lockKey);
         return res.sendStatus(200);
       }
-    }
 
-    // =============================
-    // ✅ FIX #2: SI PREGUNTA “COMO SE USA” y ya hay producto
-    // =============================
-    if (isUsageQuestion(userText)) {
-      const prod = await getContextProduct(from, st);
-
-      if (prod) {
-        const usage = prod.usage || null;
-        const size = extractSizeFromName(prod.name) || prod.size || null;
-
-        if (usage) {
-          await sendWhatsAppMessage(
-            from,
-            `${usage}\n${size ? `Presentación: ${size}\n` : ""}¿Te lo reservo? 😊`
-          );
-        } else {
-          await sendWhatsAppMessage(
-            from,
-            `Mi amor este es:\n${prod.name}\nPrecio: ${money(
-              prod.price
-            )}\n¿Te lo reservo? 😊`
-          );
-        }
-
+      // si no se resolvió por regla -> IA con contexto del producto
+      const ai = await answerProductQuestionWithAI(from, st, userText);
+      if (ai) {
+        await sendWhatsAppMessage(from, ai);
         await redisDel(lockKey);
         return res.sendStatus(200);
       }
@@ -618,7 +618,6 @@ app.post("/webhook", async (req, res) => {
       st.productId = prod.id;
       await redisSet(K.lastprod(from), prod.id);
 
-      // si el user quiere pedir o confirmar, avanzar directo
       if (
         isOrderIntent(userText) ||
         normalizeText(userText).includes("quiero") ||
@@ -789,7 +788,7 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // 4) Si pregunta imagen y ya hay producto seleccionado
+    // 4) Imagen con producto seleccionado
     if (isAskingForImage(userText) && st.productId) {
       const prod = getProductById(st.productId);
       if (prod?.image) {
@@ -799,24 +798,7 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    // 5) OpenAI solo si es fuera del tema
-    if (shouldUseOpenAI(userText)) {
-      const history = await getMemory(from);
-      const ai = await callOpenAI(history, userText);
-
-      const newHistory = [
-        ...history,
-        { role: "user", content: userText },
-        { role: "assistant", content: ai },
-      ];
-      await saveMemory(from, newHistory);
-
-      await sendWhatsAppMessage(from, ai);
-      await redisDel(lockKey);
-      return res.sendStatus(200);
-    }
-
-    // 6) Respuesta por defecto
+    // ✅ 5) Respuesta default
     await sendWhatsAppMessage(from, "Mi amor dime el nombre del producto y te digo precio 😊💗");
     await redisDel(lockKey);
     return res.sendStatus(200);
@@ -826,7 +808,6 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// =============================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Bot corriendo en puerto ${PORT}`);
