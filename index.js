@@ -22,7 +22,7 @@ const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 const ADMIN_PHONE = process.env.ADMIN_PHONE || "18492010239";
 
 const MODEL = process.env.OPENAI_MODEL || "gpt-4.1-nano";
-const MEMORY_TTL_SECONDS = 60 * 60 * 24; // 24h
+const MEMORY_TTL_SECONDS = 60 * 60 * 24;
 const MAX_HISTORY_MESSAGES = 10;
 
 // =============================
@@ -30,7 +30,6 @@ const MAX_HISTORY_MESSAGES = 10;
 // =============================
 let PRODUCTS = [];
 let productIndex = [];
-let categoryIndex = new Map(); // category -> products[]
 let CATALOG_OK = false;
 
 function normalizeText(s) {
@@ -54,7 +53,7 @@ function loadCatalogFromFile() {
   const data = JSON.parse(raw);
 
   if (!Array.isArray(data) || data.length === 0) {
-    console.log("❌ catalog.json inválido o vacío");
+    console.log("❌ catalog.json invalido o vacio");
     return [];
   }
 
@@ -70,21 +69,13 @@ function buildIndex() {
       ...p,
       normName,
       wordSet: new Set(words),
-      normCategory: normalizeText(p.category || ""),
     };
   });
-
-  categoryIndex = new Map();
-  for (const p of productIndex) {
-    const cat = p.normCategory || "otros";
-    if (!categoryIndex.has(cat)) categoryIndex.set(cat, []);
-    categoryIndex.get(cat).push(p);
-  }
 }
 
 function loadCatalog() {
   PRODUCTS = loadCatalogFromFile();
-  CATALOG_OK = PRODUCTS.length > 0;
+  CATALOG_OK = PRODUCTS.length > 3;
 
   if (!CATALOG_OK) {
     PRODUCTS = [];
@@ -106,7 +97,6 @@ async function redisGet(key) {
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` },
   });
-
   const data = await res.json();
   if (!res.ok) return null;
   if (!data?.result) return null;
@@ -145,22 +135,10 @@ const K = {
   state: (wa) => `glowny:state:${wa}`,
   lastprod: (wa) => `glowny:lastprod:${wa}`,
   lock: (wa) => `glowny:lock:${wa}`,
-  mid: (mid) => `glowny:mid:${mid}`, // para dedupe de mensajes
 };
 
 // =============================
-// HELPERS
-// =============================
-function money(n) {
-  return `RD$${Number(n || 0).toLocaleString("en-US")}`;
-}
-
-function safeTrim(s) {
-  return (s || "").toString().trim();
-}
-
-// =============================
-// PRODUCT MATCHING (MEJORADO)
+// PRODUCT MATCHING (100%)
 // =============================
 function findProducts(query) {
   if (!CATALOG_OK) return [];
@@ -175,17 +153,11 @@ function findProducts(query) {
     .map((p) => {
       let score = 0;
 
-      // match completo dentro del nombre
       if (p.normName.includes(q)) score += 10;
 
       // hits por palabras
       const hits = qWords.filter((w) => p.wordSet.has(w)).length;
       score += hits;
-
-      // bonus si coincide por palabra clave larga
-      for (const w of qWords) {
-        if (w.length >= 5 && p.normName.includes(w)) score += 1;
-      }
 
       return { p, score };
     })
@@ -197,24 +169,73 @@ function findProducts(query) {
 
 function getProductById(id) {
   if (!CATALOG_OK) return null;
-  return productIndex.find((p) => p.id === id) || null;
+  return PRODUCTS.find((p) => p.id === id) || null;
 }
 
-function listSimilarByCategory(catNorm, excludeId = null, limit = 5) {
-  if (!catNorm) return [];
-  const arr = categoryIndex.get(catNorm) || [];
-  const filtered = excludeId ? arr.filter((p) => p.id !== excludeId) : arr;
-  return filtered.slice(0, limit);
+function money(n) {
+  return `RD$${Number(n || 0).toLocaleString("en-US")}`;
 }
 
-function getCategoriesMenu(limit = 7) {
-  const cats = Array.from(categoryIndex.keys())
-    .filter((c) => c && c !== "otros")
-    .slice(0, limit);
+// =============================
+// ✅ NUEVO: PREGUNTA DE TAMAÑO
+// =============================
+function isSizeQuestion(text) {
+  const q = normalizeText(text);
+  return (
+    q.includes("tamano") ||
+    q.includes("tamaño") ||
+    q.includes("presentacion") ||
+    q.includes("presentación") ||
+    q.includes("cuantos gramos") ||
+    q.includes("cuanto gramos") ||
+    q.includes("cuantos ml") ||
+    q.includes("cuanto ml") ||
+    q.includes("cuanto trae") ||
+    q.includes("que tamano") ||
+    q.includes("de que tamaño") ||
+    q.includes("de cuantos") ||
+    q.includes("g ") ||
+    q.includes("ml ")
+  );
+}
 
-  if (!cats.length) return null;
+function extractSizeFromName(productName = "") {
+  const t = productName;
 
-  return cats;
+  // ejemplo: "250 g", "250g"
+  let m = t.match(/(\d{2,4})\s?(g|gr|gramos)\b/i);
+  if (m) return `${m[1]} g`;
+
+  // ejemplo: "400 ml", "400ml"
+  m = t.match(/(\d{2,4})\s?(ml|mililitros)\b/i);
+  if (m) return `${m[1]} ml`;
+
+  // ejemplo: "30 cápsulas"
+  m = t.match(/(\d{1,3})\s?(capsulas|cápsulas|caps)\b/i);
+  if (m) return `${m[1]} cápsulas`;
+
+  return null;
+}
+
+// =============================
+// ✅ NUEVO: PREGUNTA DE USO / COMO SE USA
+// =============================
+function isUsageQuestion(text) {
+  const q = normalizeText(text);
+  return (
+    q.includes("como se usa") ||
+    q.includes("cómo se usa") ||
+    q.includes("como usar") ||
+    q.includes("cómo usar") ||
+    q.includes("modo de uso") ||
+    q.includes("instrucciones") ||
+    q.includes("aplica") ||
+    q.includes("se aplica") ||
+    q.includes("cuantas veces") ||
+    q.includes("cuánto se usa") ||
+    q.includes("para que sirve") ||
+    q.includes("para qué sirve")
+  );
 }
 
 // =============================
@@ -243,8 +264,7 @@ function isOrderIntent(text) {
     q.includes("confirmar el pedido") ||
     q.includes("confirmo el pedido") ||
     q.includes("ordenar") ||
-    q.includes("reservar") ||
-    q.includes("comprar")
+    q.includes("reservar")
   );
 }
 
@@ -259,7 +279,8 @@ function extractQty(text) {
 
 function extractPayment(text) {
   const q = normalizeText(text);
-  if (q.includes("contra entrega") || q.includes("efectivo")) return "Contra entrega";
+  if (q.includes("contra entrega") || q.includes("efectivo"))
+    return "Contra entrega";
   if (q.includes("transfer")) return "Transferencia";
   return null;
 }
@@ -270,69 +291,38 @@ function isAskingForImage(text) {
     q.includes("foto") ||
     q.includes("imagen") ||
     q.includes("muestrame") ||
-    q.includes("mostrar") ||
+    q.includes("muéstrame") ||
     q.includes("ver")
   );
 }
 
-// ✅ NUEVO: “como se usa”
-function isUsageQuestion(text) {
-  const q = normalizeText(text);
-  return (
-    q.includes("como se usa") ||
-    q.includes("como usar") ||
-    q.includes("modo de uso") ||
-    q.includes("como aplic") ||
-    q.includes("se aplica") ||
-    q.includes("se usa") ||
-    q.includes("cada cuanto") ||
-    q.includes("de dia") ||
-    q.includes("de noche")
-  );
-}
-
-// ✅ NUEVO: “que otras tienes / opciones”
-function isOtherOptionsQuestion(text) {
-  const q = normalizeText(text);
-  return (
-    q.includes("que otras tienes") ||
-    q.includes("cuales otras") ||
-    q.includes("que mas tienes") ||
-    q.includes("tienes mas") ||
-    q.includes("otras opciones") ||
-    q.includes("dame opciones") ||
-    q.includes("algo parecido") ||
-    q.includes("otra opcion")
-  );
-}
-
 // =============================
-// OPENAI (SOLO si es necesario)
+// OPENAI (SOLO si de verdad es necesario)
 // =============================
 function shouldUseOpenAI(text) {
   if (!CATALOG_OK) return false;
 
   const q = normalizeText(text);
 
-  // ❌ si parece pedido/producto/venta directa, no usar AI
+  // si parece pedido/producto -> NO usar
   if (
     q.includes("precio") ||
-    q.includes("cuanto cuesta") ||
     q.includes("quiero") ||
     q.includes("necesito") ||
+    q.includes("colageno") ||
+    q.includes("colágeno") ||
+    q.includes("serum") ||
+    q.includes("crema") ||
+    q.includes("aceite") ||
     q.includes("envio") ||
+    q.includes("envío") ||
     q.includes("ubicacion") ||
-    q.includes("contra entrega") ||
-    q.includes("transferencia") ||
+    q.includes("ubicación") ||
     isOrderIntent(text)
   ) {
     return false;
   }
 
-  // ❌ si es “otras opciones” lo manejamos nosotros
-  if (isOtherOptionsQuestion(text)) return false;
-
-  // ✅ si es algo fuera de catálogo: piel, recomendación, dudas generales
   return true;
 }
 
@@ -341,22 +331,21 @@ function getSystemPrompt() {
 Eres una asistente de ventas por WhatsApp de "Glowny Essentials" en República Dominicana.
 
 REGLAS OBLIGATORIAS:
-- Responde corto (1 a 3 líneas), amable y directo.
+- Responde 1 a 3 líneas, corto y directo.
 - Nunca digas "contacta al equipo de ventas", "visita la web", "soporte", ni nada parecido.
-- No inventes precios ni productos. Si te preguntan por productos, solo usa el catálogo.
-- Si te preguntan "cómo se usa", da pasos claros y seguros.
-- Si no estás segura de algo, pregunta 1 sola cosa para aclarar.
+- No inventes precios ni productos.
+- Si el cliente pregunta algo raro, responde amable y llévalo al pedido.
+- Siempre termina con una pregunta para continuar el pedido: "¿Te lo reservo?" o "¿Cuántos deseas?".
 `;
 }
 
-async function callOpenAI(history, userText, extraContext = "") {
+async function callOpenAI(history, userText) {
   if (!OPENAI_API_KEY) {
-    return "Mi amor dime qué producto necesitas y te ayudo 😊";
+    return "Mi amor dime qué producto quieres y te ayudo 😊";
   }
 
   const messages = [
     { role: "system", content: getSystemPrompt() },
-    ...(extraContext ? [{ role: "system", content: extraContext }] : []),
     ...history,
     { role: "user", content: userText },
   ];
@@ -365,7 +354,7 @@ async function callOpenAI(history, userText, extraContext = "") {
     model: MODEL,
     messages,
     temperature: 0.2,
-    max_tokens: 180,
+    max_tokens: 160,
   };
 
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -387,7 +376,10 @@ async function callOpenAI(history, userText, extraContext = "") {
     return "Ahora mismo tuve un error 😥 ¿Me lo repites?";
   }
 
-  return data.choices?.[0]?.message?.content?.trim() || "¿Qué producto deseas mi amor? 😊";
+  return (
+    data.choices?.[0]?.message?.content?.trim() ||
+    "¿Qué producto deseas mi amor? 😊"
+  );
 }
 
 // =============================
@@ -473,10 +465,6 @@ async function getState(wa) {
     location: st.location || null,
     reference: st.reference || null,
     payment: st.payment || null,
-
-    // ✅ NUEVO: contexto real
-    lastCategory: st.lastCategory || null, // normalized category
-    lastProductName: st.lastProductName || null,
   };
 }
 
@@ -493,6 +481,20 @@ async function saveMemory(wa, history) {
   await redisSet(K.mem(wa), history.slice(-MAX_HISTORY_MESSAGES));
 }
 
+// ✅ helper: traer producto actual o último producto usado
+async function getContextProduct(wa, st) {
+  if (st?.productId) {
+    const p = getProductById(st.productId);
+    if (p) return p;
+  }
+  const last = await redisGet(K.lastprod(wa));
+  if (last) {
+    const p = getProductById(last);
+    if (p) return p;
+  }
+  return null;
+}
+
 // =============================
 // MAIN WEBHOOK
 // =============================
@@ -506,14 +508,7 @@ app.post("/webhook", async (req, res) => {
     if (!message) return res.sendStatus(200);
 
     const from = message.from;
-    const msgId = message.id;
-
-    // ✅ DEDUPE por message.id (Meta reintenta y por eso ves respuestas raras/repetidas)
-    if (msgId) {
-      const seen = await redisGet(K.mid(msgId));
-      if (seen) return res.sendStatus(200);
-      await redisSet(K.mid(msgId), "1", 60); // 60 segundos
-    }
+    let userText = "";
 
     // lock anti doble respuesta
     const lockKey = K.lock(from);
@@ -521,7 +516,7 @@ app.post("/webhook", async (req, res) => {
     if (lock) return res.sendStatus(200);
     await redisSet(lockKey, "1", 2);
 
-    // Si no hay catálogo -> responder fijo y no usar AI
+    // Si no hay catálogo -> responder fijo
     if (!CATALOG_OK) {
       await sendWhatsAppMessage(
         from,
@@ -530,8 +525,6 @@ app.post("/webhook", async (req, res) => {
       await redisDel(lockKey);
       return res.sendStatus(200);
     }
-
-    let userText = "";
 
     // Location
     if (message.type === "location" && message.location) {
@@ -548,53 +541,73 @@ app.post("/webhook", async (req, res) => {
       if (st.step === "ASK_LOCATION") st.step = "ASK_REFERENCE";
       await setState(from, st);
 
-      await sendWhatsAppMessage(from, "Perfecto ✅ Ahora dime una referencia breve (Ej: “cerca del colmado”).");
+      await sendWhatsAppMessage(
+        from,
+        "Perfecto ✅ Ahora dime una referencia breve (Ej: “cerca del colmado”)."
+      );
       await redisDel(lockKey);
       return res.sendStatus(200);
     } else {
       userText = message.text?.body || "";
     }
 
-    userText = safeTrim(userText);
     const st = await getState(from);
 
-    // ✅ 0) “Que otras tienes?” -> usar última categoría si existe
-    if (isOtherOptionsQuestion(userText)) {
-      // si ya tengo un producto seleccionado, uso su categoría
-      let cat = st.lastCategory;
-      if (!cat && st.productId) {
-        const p = getProductById(st.productId);
-        if (p?.normCategory) cat = p.normCategory;
-      }
+    // =============================
+    // ✅ FIX #1: SI PREGUNTA TAMAÑO y ya hay producto
+    // =============================
+    if (isSizeQuestion(userText)) {
+      const prod = await getContextProduct(from, st);
 
-      if (cat) {
-        const options = listSimilarByCategory(cat, st.productId, 5);
+      if (prod) {
+        const size = extractSizeFromName(prod.name) || prod.size || null;
 
-        if (options.length) {
-          const lines = options.map((p, i) => `${i + 1}) ${p.name} — ${money(p.price)}`);
+        if (size) {
           await sendWhatsAppMessage(
             from,
-            `Claro mi amor 💗 Aquí tienes más opciones:\n${lines.join("\n")}\n\n¿Cuál te interesa? 😊`
+            `Es de ${size} 💗\nPrecio: ${money(prod.price)}\n¿Te lo reservo? 😊`
           );
-          await redisDel(lockKey);
-          return res.sendStatus(200);
+        } else {
+          await sendWhatsAppMessage(
+            from,
+            `Mi amor es esta presentación:\n${prod.name}\nPrecio: ${money(
+              prod.price
+            )}\n¿Te lo reservo? 😊`
+          );
         }
-      }
 
-      // si no hay categoría, mostramos un mini menú
-      const cats = getCategoriesMenu();
-      if (cats?.length) {
-        await sendWhatsAppMessage(
-          from,
-          `Claro 😊 ¿Qué te interesa ver?\n${cats.map((c, i) => `${i + 1}) ${c}`).join("\n")}\n\nRespóndeme con el número o el nombre.`
-        );
         await redisDel(lockKey);
         return res.sendStatus(200);
       }
+    }
 
-      await sendWhatsAppMessage(from, "Mi amor dime el nombre del producto que buscas y te digo precio 😊💗");
-      await redisDel(lockKey);
-      return res.sendStatus(200);
+    // =============================
+    // ✅ FIX #2: SI PREGUNTA “COMO SE USA” y ya hay producto
+    // =============================
+    if (isUsageQuestion(userText)) {
+      const prod = await getContextProduct(from, st);
+
+      if (prod) {
+        const usage = prod.usage || null;
+        const size = extractSizeFromName(prod.name) || prod.size || null;
+
+        if (usage) {
+          await sendWhatsAppMessage(
+            from,
+            `${usage}\n${size ? `Presentación: ${size}\n` : ""}¿Te lo reservo? 😊`
+          );
+        } else {
+          await sendWhatsAppMessage(
+            from,
+            `Mi amor este es:\n${prod.name}\nPrecio: ${money(
+              prod.price
+            )}\n¿Te lo reservo? 😊`
+          );
+        }
+
+        await redisDel(lockKey);
+        return res.sendStatus(200);
+      }
     }
 
     // 1) Detectar producto por texto
@@ -602,58 +615,22 @@ app.post("/webhook", async (req, res) => {
 
     if (matches.length === 1) {
       const prod = matches[0];
-
       st.productId = prod.id;
-      st.lastCategory = prod.normCategory || st.lastCategory || "otros";
-      st.lastProductName = prod.name;
       await redisSet(K.lastprod(from), prod.id);
 
-      // ✅ “como se usa” justo después de mencionar el producto
-      if (isUsageQuestion(userText)) {
-        // si viene usage en el catálogo
-        if (prod.usage && safeTrim(prod.usage).length > 3) {
-          await setState(from, st);
-          await sendWhatsAppMessage(
-            from,
-            `Modo de uso 💗\n${safeTrim(prod.usage)}\n\n¿Quieres que te lo reserve? 😊`
-          );
-          await redisDel(lockKey);
-          return res.sendStatus(200);
-        }
-
-        // si NO viene usage -> OpenAI con contexto del producto (sin inventar)
-        const extraContext = `
-Producto del catálogo:
-- Nombre: ${prod.name}
-- Categoría: ${prod.category || "N/A"}
-- Precio: ${prod.price}
-Regla: Solo explica modo de uso seguro y general, NO inventes beneficios médicos.
-`;
-        const history = await getMemory(from);
-        const ai = await callOpenAI(history, "¿Cómo se usa este producto?", extraContext);
-
-        const newHistory = [
-          ...history,
-          { role: "user", content: userText },
-          { role: "assistant", content: ai },
-        ];
-        await saveMemory(from, newHistory);
-
-        await setState(from, st);
-        await sendWhatsAppMessage(from, `${ai}\n\n¿Quieres que te lo reserve? 😊`);
-        await redisDel(lockKey);
-        return res.sendStatus(200);
-      }
-
       // si el user quiere pedir o confirmar, avanzar directo
-      const qNorm = normalizeText(userText);
-      if (isOrderIntent(userText) || qNorm.includes("quiero") || qNorm.includes("necesito")) {
+      if (
+        isOrderIntent(userText) ||
+        normalizeText(userText).includes("quiero") ||
+        normalizeText(userText).includes("necesito")
+      ) {
         st.step = "ASK_QTY";
         await setState(from, st);
-
         await sendWhatsAppMessage(
           from,
-          `Tengo ese 💗\n${prod.name}\nPrecio: ${money(prod.price)} c/u\n¿Cuántos deseas? 😊`
+          `Tengo ese 💗\n${prod.name}\nPrecio: ${money(
+            prod.price
+          )} c/u\n¿Cuántos deseas? 😊`
         );
         await redisDel(lockKey);
         return res.sendStatus(200);
@@ -662,49 +639,23 @@ Regla: Solo explica modo de uso seguro y general, NO inventes beneficios médico
       await setState(from, st);
 
       if (isAskingForImage(userText) && prod.image) {
-        await sendWhatsAppImage(from, prod.image, `${prod.name}\nPrecio: ${money(prod.price)}\n¿Lo quieres para pedirlo? 💗`);
+        await sendWhatsAppImage(
+          from,
+          prod.image,
+          `${prod.name}\nPrecio: ${money(prod.price)}\n¿Lo quieres para pedirlo? 💗`
+        );
         await redisDel(lockKey);
         return res.sendStatus(200);
       }
 
-      await sendWhatsAppMessage(from, `Sí mi amor 💗\n${prod.name}\nPrecio: ${money(prod.price)}\n¿Te lo reservo? 😊`);
+      await sendWhatsAppMessage(
+        from,
+        `Sí mi amor 💗\n${prod.name}\nPrecio: ${money(
+          prod.price
+        )}\n¿Te lo reservo? 😊`
+      );
       await redisDel(lockKey);
       return res.sendStatus(200);
-    }
-
-    // ✅ 1.1) Si el usuario pregunta “cómo se usa” y ya hay producto seleccionado
-    if (isUsageQuestion(userText) && st.productId) {
-      const prod = getProductById(st.productId);
-
-      if (prod) {
-        if (prod.usage && safeTrim(prod.usage).length > 3) {
-          await sendWhatsAppMessage(from, `Modo de uso 💗\n${safeTrim(prod.usage)}\n\n¿Te lo reservo? 😊`);
-          await redisDel(lockKey);
-          return res.sendStatus(200);
-        }
-
-        // OpenAI si no hay usage
-        const extraContext = `
-Producto del catálogo:
-- Nombre: ${prod.name}
-- Categoría: ${prod.category || "N/A"}
-- Precio: ${prod.price}
-Regla: Solo explica modo de uso seguro y general.
-`;
-        const history = await getMemory(from);
-        const ai = await callOpenAI(history, userText, extraContext);
-
-        const newHistory = [
-          ...history,
-          { role: "user", content: userText },
-          { role: "assistant", content: ai },
-        ];
-        await saveMemory(from, newHistory);
-
-        await sendWhatsAppMessage(from, `${ai}\n\n¿Te lo reservo? 😊`);
-        await redisDel(lockKey);
-        return res.sendStatus(200);
-      }
     }
 
     // 2) Si dice confirmar pedido pero no hay product seleccionado -> usar el lastprod
@@ -713,14 +664,16 @@ Regla: Solo explica modo de uso seguro y general.
       if (last) {
         st.productId = last;
         st.step = "ASK_QTY";
+        await setState(from, st);
+
         const prod = getProductById(last);
-
         if (prod) {
-          st.lastCategory = prod.normCategory || st.lastCategory || "otros";
-          st.lastProductName = prod.name;
-
-          await setState(from, st);
-          await sendWhatsAppMessage(from, `Perfecto mi amor 💗\n${prod.name}\nPrecio: ${money(prod.price)}\n¿Cuántos deseas? 😊`);
+          await sendWhatsAppMessage(
+            from,
+            `Perfecto mi amor 💗\n${prod.name}\nPrecio: ${money(
+              prod.price
+            )}\n¿Cuántos deseas? 😊`
+          );
           await redisDel(lockKey);
           return res.sendStatus(200);
         }
@@ -740,7 +693,10 @@ Regla: Solo explica modo de uso seguro y general.
       const qty = extractQty(userText) || (isConfirmYes(userText) ? 1 : null);
 
       if (!qty) {
-        await sendWhatsAppMessage(from, "¿Cuántos deseas mi amor? 😊 (Ej: 1, 2, 3)");
+        await sendWhatsAppMessage(
+          from,
+          "¿Cuántos deseas mi amor? 😊 (Ej: 1, 2, 3)"
+        );
         await redisDel(lockKey);
         return res.sendStatus(200);
       }
@@ -758,10 +714,13 @@ Regla: Solo explica modo de uso seguro y general.
     }
 
     if (st.step === "ASK_REFERENCE") {
-      const ref = safeTrim(userText);
+      const ref = userText.trim();
 
       if (!ref || normalizeText(ref) === "ubicacion enviada") {
-        await sendWhatsAppMessage(from, "Dime una referencia breve mi amor 😊 (Ej: cerca del colmado)");
+        await sendWhatsAppMessage(
+          from,
+          "Dime una referencia breve mi amor 😊 (Ej: cerca del colmado)"
+        );
         await redisDel(lockKey);
         return res.sendStatus(200);
       }
@@ -793,7 +752,9 @@ Regla: Solo explica modo de uso seguro y general.
 
       await sendWhatsAppMessage(
         from,
-        `Perfecto ✅\n🛒 Tu pedido:\n- ${st.qty}x ${prod.name}\n💰 Total: ${money(total)}\n¿Confirmas para procesarlo? 😊`
+        `Perfecto ✅\n🛒 Tu pedido:\n- ${st.qty}x ${prod.name}\n💰 Total: ${money(
+          total
+        )}\n¿Confirmas para procesarlo? 😊`
       );
       await redisDel(lockKey);
       return res.sendStatus(200);
@@ -803,9 +764,12 @@ Regla: Solo explica modo de uso seguro y general.
       const prod = getProductById(st.productId);
       const total = prod.price * st.qty;
 
-      await sendWhatsAppMessage(from, "Listoo 💗✅\nTu pedido quedó confirmado.\nEn breve te lo coordinamos 😊");
+      await sendWhatsAppMessage(
+        from,
+        "Listoo 💗✅\nTu pedido quedó confirmado.\nEn breve te lo coordinamos 😊"
+      );
 
-      // admin (nota: puede fallar si el admin no está dentro de ventana o no inició chat)
+      // admin
       let adminText = `📦 NUEVO PEDIDO CONFIRMADO - Glowny Essentials\n\n`;
       adminText += `🛒 ${st.qty}x ${prod.name} — ${money(prod.price)}\n`;
       adminText += `💰 Total: ${money(total)}\n`;
@@ -817,11 +781,7 @@ Regla: Solo explica modo de uso seguro y general.
         adminText += `\n📍 Ubicación:\nhttps://www.google.com/maps?q=${st.location.lat},${st.location.lon}\n`;
       }
 
-      try {
-        await sendWhatsAppMessage(ADMIN_PHONE, adminText);
-      } catch (e) {
-        console.log("⚠️ No se pudo enviar al admin (ventana/permiso).");
-      }
+      await sendWhatsAppMessage(ADMIN_PHONE, adminText);
 
       // reset
       await redisDel(K.state(from));
@@ -839,17 +799,10 @@ Regla: Solo explica modo de uso seguro y general.
       }
     }
 
-    // ✅ 5) OpenAI solo si es fuera del tema
+    // 5) OpenAI solo si es fuera del tema
     if (shouldUseOpenAI(userText)) {
       const history = await getMemory(from);
-
-      // Contexto suave para que no se vuelva loco
-      const extraContext = `
-Si el usuario pide recomendaciones, sugiere 1-2 categorías del catálogo y pregunta 1 cosa.
-No inventes productos.
-`;
-
-      const ai = await callOpenAI(history, userText, extraContext);
+      const ai = await callOpenAI(history, userText);
 
       const newHistory = [
         ...history,
@@ -863,7 +816,7 @@ No inventes productos.
       return res.sendStatus(200);
     }
 
-    // 6) Respuesta por defecto (sin AI)
+    // 6) Respuesta por defecto
     await sendWhatsAppMessage(from, "Mi amor dime el nombre del producto y te digo precio 😊💗");
     await redisDel(lockKey);
     return res.sendStatus(200);
