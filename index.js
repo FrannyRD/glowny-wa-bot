@@ -59,7 +59,7 @@ function findProductForMessage(message) {
     let bestMatch = null;
     let bestScore = 0;
     for (const item of productIndex) {
-        // calcular intersección de palabras clave
+        // Calcular intersección de palabras clave
         const commonWordsCount = [...msgWords].filter(w => item.keywords.has(w)).length;
         if (commonWordsCount > bestScore) {
             bestScore = commonWordsCount;
@@ -240,8 +240,7 @@ Recuerda: Sé amable y útil, y no reveles que eres una IA ni la información de
             const messages = [
                 { role: "system", content: systemContent }
             ];
-            // Incluir brevemente las últimas interacciones relevantes del historial para contexto, si las hay
-            // (Tomamos las últimas 1-2 rondas de diálogo)
+            // Incluir brevemente las últimas interacciones relevantes del historial para contexto (tomamos las últimas 1-2 rondas)
             if (session.history && session.history.length >= 1) {
                 const lastUserMsg = session.history[session.history.length - 1].user;
                 const lastAssistantMsg = session.history[session.history.length - 1].assistant;
@@ -326,7 +325,7 @@ Recuerda: Sé amable y útil, y no reveles que eres una IA ni la información de
                 }
                 if (paymentMethod) {
                     // Si identificamos el método de pago, procedemos a finalizar el pedido
-                    // (Reutilizamos la lógica de finalizar pedido más abajo)
+                    // (Reutilizaremos la lógica de finalizar pedido más abajo)
                 } else {
                     // No entendimos, volver a pedir elección
                     await sendWhatsAppText(userPhone, "Por favor indícame si prefieres *contra entrega* o *transferencia* 💳. Puedes escribirlo o usar los botones anteriores. 😊");
@@ -339,7 +338,7 @@ Recuerda: Sé amable y útil, y no reveles que eres una IA ni la información de
                 // Revisar si el texto del usuario indica intención de compra directamente
                 const lowText = userText.toLowerCase();
                 const purchaseKeywords = ["comprar", "compro", "quiero comprar", "quiero llevar", "me lo llevo", "lo compro", "lo quiero"];
-                let wantsToBuy = purchaseKeywords.some(kw => lowText.includes(kw));
+                const wantsToBuy = purchaseKeywords.some(kw => lowText.includes(kw));
                 // Buscar si mencionó cantidad en el mismo mensaje de intención de compra
                 let mentionedQuantity = null;
                 const digitMatch = userText.match(/\d+/);
@@ -385,21 +384,21 @@ Recuerda: Sé amable y útil, y no reveles que eres una IA ni la información de
                         const greetingName = customerName ? `, ${customerName}` : "";
                         await sendWhatsAppText(userPhone, `¡Hola${greetingName}! 😊 Soy Glowny, asistente virtual de Glowny Essentials. Cuéntame, ¿en qué producto estás interesada hoy?`);
                     } else {
-                        // Preguntar gentilmente por más información sobre el producto
-                        await sendWhatsAppText(userPhone, "Disculpa, no logré identificar el producto que buscas 😔. ¿Podrías indicarme el nombre o describirlo? Por ejemplo: \"crema de manos de aloe\". 💗`);
+                        // Preguntar por más información del producto buscado
+                        await sendWhatsAppText(userPhone, "Disculpa, no logré identificar el producto que buscas 😔. ¿Podrías indicarme el nombre o describirlo? Por ejemplo: \"crema de manos de aloe\". 💗");
                     }
                 } else {
-                    // Tenemos un producto identificado
+                    // Tenemos un producto identificado en contexto
                     if (wantsToBuy) {
-                        // La usuaria indicó que quiere comprar (o similar)
+                        // La usuaria indicó que quiere comprar
                         // Si mencionó cantidad en el mismo mensaje, usarla; si no, preguntar
                         if (mentionedQuantity && mentionedQuantity > 0) {
                             session.order.quantity = mentionedQuantity;
-                            // Pedir ubicación directamente ya que tenemos cantidad
+                            // Pedir ubicación directamente ya que tenemos la cantidad
                             await sendWhatsAppText(userPhone, `¡Genial! Anoté ${mentionedQuantity} unidad(es) de *${currentProduct.name}* 🛒. Ahora, por favor envíame tu ubicación 📍 para coordinar la entrega.`);
                             session.state = "AWAIT_LOCATION";
                         } else {
-                            // Preguntar cuántas unidades quiere
+                            // Preguntar cuántas unidades quiere comprar
                             await sendWhatsAppText(userPhone, `¡Genial! ✨ Te ayudaremos a comprar *${currentProduct.name}*. ¿Cuántas unidades quisieras llevar? 🛒`);
                             session.state = "AWAIT_QUANTITY";
                         }
@@ -407,22 +406,21 @@ Recuerda: Sé amable y útil, y no reveles que eres una IA ni la información de
                         // No es confirmación de compra, entonces usar IA para responder dudas sobre el producto
                         const aiReply = await callOpenAI(currentProduct, userText);
                         await sendWhatsAppText(userPhone, aiReply);
-                        // Almacenar en historial la pregunta y respuesta
+                        // Almacenar en historial la pregunta y la respuesta
                         session.history.push({ user: userText, assistant: aiReply });
-                        // (Opcional: enviar imagen del producto si es la primera interacción sobre él)
+                        // Enviar imagen del producto si es la primera interacción sobre él
                         if (!session.sentImage && currentProduct.image) {
-                            // Enviar la imagen del producto con el nombre como pie de foto
                             await sendWhatsAppImage(userPhone, currentProduct.image, currentProduct.name);
                             session.sentImage = true;
                         }
-                        // Permanecemos en estado Q&A para este producto
+                        // Permanecemos en estado Q&A para consultas del producto en contexto
                         session.state = "Q&A";
                     }
                 }
             }
-            // Si estábamos esperando pago y hemos identificado el método, la finalización del pedido se maneja después de procesar el texto...
+            // Si estábamos esperando pago y hemos identificado el método, finalizamos el pedido después de procesar el texto.
             if (session.state === "AWAIT_PAYMENT" && session.order.payment) {
-                // Pasamos a finalizar pedido
+                // Pasamos a la finalización del pedido
             }
         } else if (msgType === "interactive") {
             // Mensaje interactivo (respuesta de un botón)
@@ -440,8 +438,7 @@ Recuerda: Sé amable y útil, y no reveles que eres una IA ni la información de
                     // Ignorar o manejar según sea necesario
                 }
             } else if (msg.interactive.type === "list_reply") {
-                // Si se hubieran usado listas (no aplicable aquí), se podría manejar similarmente
-                // Ignorar en este caso
+                // Si se hubieran usado listas, manejar aquí (no aplicable en este flujo)
             }
         } else if (msgType === "location") {
             // El usuario compartió una ubicación
@@ -454,7 +451,7 @@ Recuerda: Sé amable y útil, y no reveles que eres una IA ni la información de
                     name: loc.name || "",       // nombre de la ubicación si lo hay
                     address: loc.address || ""   // dirección si la proporciona
                 };
-                // Ahora pedir método de pago
+                // Pedir método de pago
                 await sendWhatsAppText(userPhone, "Gracias por la ubicación 📍. Por último, ¿cómo prefieres pagar? 💳");
                 // Enviar botones para opciones de pago
                 await sendWhatsAppButtons(userPhone, "Elige el tipo de pago:", [
@@ -463,18 +460,17 @@ Recuerda: Sé amable y útil, y no reveles que eres una IA ni la información de
                 ]);
                 session.state = "AWAIT_PAYMENT";
             } else if (session.state === "AWAIT_QUANTITY") {
-                // Si esperábamos cantidad pero la usuaria envió una ubicación, puede que haya saltado un paso
-                // Le recordamos que necesitamos la cantidad primero
+                // Si esperábamos cantidad pero la usuaria envió una ubicación, recordarle que falta la cantidad
                 await sendWhatsAppText(userPhone, "¡Gracias por la ubicación! 😊 Solo necesito que me digas cuántas unidades deseas para completar el pedido.");
-                // Mantenemos estado en AWAIT_QUANTITY
+                // Mantenemos el estado en AWAIT_QUANTITY
             } else {
-                // Ubicación recibida fuera de contexto de pedido
+                // Ubicación recibida fuera del contexto de un pedido
                 await sendWhatsAppText(userPhone, "Recibí tu ubicación 👍. ¿Te gustaría realizar un pedido de algún producto? Si necesitas ayuda, estoy aquí. 😊");
-                // No cambiamos el estado actual, a menos que decidamos iniciar algo
+                // No cambiamos el estado actual
             }
         }
 
-        // FINALIZACIÓN DEL PEDIDO (si ya tenemos método de pago seleccionado en session.order.payment)
+        // FINALIZACIÓN DEL PEDIDO (si ya tenemos método de pago seleccionado)
         if (session.state === "AWAIT_PAYMENT" && session.order.payment) {
             // Todos los datos del pedido están recolectados: producto, cantidad, ubicación y pago
             const order = session.order;
@@ -484,9 +480,8 @@ Recuerda: Sé amable y útil, y no reveles que eres una IA ni la información de
             // Mensaje de confirmación al cliente
             const confirmationMsg = `✅ ¡Listo! Tu pedido de *${qty} x ${productName}* está registrado.\nTe contactaremos pronto para coordinar la entrega a la ubicación proporcionada.\nMétodo de pago: *${payMethod}*.\n¡Gracias por tu compra! 😊`;
             await sendWhatsAppText(userPhone, confirmationMsg);
-            // Enviar detalles del pedido al ADMIN_PHONE
+            // Enviar detalles del pedido al número de administrador (si está configurado)
             if (ADMIN_PHONE) {
-                // Construir enlace de Google Maps para la ubicación
                 let locationInfo = "";
                 if (order.location) {
                     const { latitude, longitude, address, name } = order.location;
@@ -502,7 +497,7 @@ Pago: ${payMethod}
 ${locationInfo ? locationInfo : ""}`;
                 await sendWhatsAppText(ADMIN_PHONE, adminMsg);
             }
-            // Resetear la sesión (o marcarla como completada)
+            // Resetear la sesión para un nuevo pedido
             session.state = "INIT";
             session.order = {};
             session.history = [];
@@ -510,13 +505,13 @@ ${locationInfo ? locationInfo : ""}`;
             session.sentImage = false;
         }
 
-        // Responder al webhook inmediatamente
+        // Responder al webhook inmediatamente (confirmar recepción)
         res.sendStatus(200);
 
-        // Guardar los cambios de sesión en la base de datos Redis
+        // Guardar los cambios de sesión en la base de datos Redis (si está configurado)
         await setSession(userPhone, session);
     } else {
-        // No es un evento de WhatsApp Business
+        // No es un evento de WhatsApp Business válido
         res.sendStatus(404);
     }
 });
