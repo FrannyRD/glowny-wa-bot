@@ -1,940 +1,528 @@
-
-/**
- * Glowny Essentials - WhatsApp Bot (AI-first, NO hard flows)
- * ✅ Responde con IA usando catálogo
- * ✅ Maneja carrito + confirmación + datos de entrega (ubicación/referencia/pago)
- * ✅ NO pide ubicación/pago si no hay productos en el carrito
- * ✅ Si ya tiene ubicación, NO la vuelve a pedir
- * ✅ Puede mostrar "qué compré / qué tengo en el carrito"
- *
- * Requisitos ENV:
- * - WA_TOKEN
- * - PHONE_NUMBER_ID
- * - OPENAI_API_KEY
- * - UPSTASH_REDIS_REST_URL
- * - UPSTASH_REDIS_REST_TOKEN
- * - ADMIN_PHONE (tu WhatsApp para recibir pedidos)
- * - VERIFY_TOKEN (opcional)
- */
-
-const express = require("express");
-const fs = require("fs");
-const path = require("path");
-
-const fetch = (...args) =>
-  import("node-fetch").then(({ default: fetch }) => fetch(...args));
+const express = require('express');
+const axios = require('axios');
 
 const app = express();
 app.use(express.json());
 
-// =============================
-// ENV
-// =============================
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "glowny_verify";
+// Variables de entorno necesarias
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const WA_TOKEN = process.env.WA_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const ADMIN_PHONE_RAW = process.env.ADMIN_PHONE;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL;
+const UPSTASH_TOKEN = process.env.UPSTASH_REST_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN; 
 
-const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL;
-const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
-
-const ADMIN_PHONE = process.env.ADMIN_PHONE || "18492010239";
-
-const MODEL = process.env.OPENAI_MODEL || "gpt-4.1-nano";
-const MEMORY_TTL_SECONDS = 60 * 60 * 24;
-const MAX_HISTORY_MESSAGES = 12;
-
-// =============================
-// CATALOGO (catalog.json)
-// =============================
-let PRODUCTS = [];
-let productIndex = [];
-let CATALOG_OK = false;
-
-function normalizeText(s) {
-  return (s || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^\w\s+]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+// Formatear número ADMIN_PHONE con prefijo + si no lo tiene
+let ADMIN_PHONE = ADMIN_PHONE_RAW;
+if (ADMIN_PHONE && !ADMIN_PHONE.startsWith('+')) {
+    ADMIN_PHONE = '+' + ADMIN_PHONE_RAW;
 }
 
-function loadCatalogFromFile() {
-  const filePath = path.join(__dirname, "catalog.json");
+// Cargar catálogo de productos
+const catalog = require('./catalog.json');
 
-  if (!fs.existsSync(filePath)) {
-    console.log("❌ catalog.json NO existe en el deploy:", filePath);
-    return [];
-  }
-
-  const raw = fs.readFileSync(filePath, "utf8");
-  const data = JSON.parse(raw);
-
-  if (!Array.isArray(data) || data.length === 0) {
-    console.log("❌ catalog.json inválido o vacío");
-    return [];
-  }
-
-  console.log(`✅ Catálogo cargado (${data.length} productos)`);
-  return data;
+// Función para normalizar texto (a minúsculas, sin acentos, sin puntuación)
+function normalizeText(text) {
+    // Pasar a minúsculas
+    let normalized = text.toLowerCase();
+    // Remover acentos/diacríticos
+    normalized = normalized.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    // Remover caracteres no alfanuméricos (puntuación, símbolos) reemplazándolos por espacio
+    normalized = normalized.replace(/[^\w\s]/g, ' ');
+    // Trim y reemplazar múltiples espacios por uno solo
+    normalized = normalized.trim().replace(/\s+/g, ' ');
+    return normalized;
 }
 
-function buildIndex() {
-  productIndex = PRODUCTS.map((p) => {
-    const normName = normalizeText(p.name);
-    const words = normName.split(" ").filter(Boolean);
-    return {
-      ...p,
-      normName,
-      wordSet: new Set(words),
+// Palabras comunes que ignoraremos en la búsqueda (stopwords) y términos de marca a ignorar
+const SPANISH_STOPWORDS = new Set(["de","la","y","con","para","del","en","el","al","por","una","un","unos","unas",
+                                   "lo","los","las","le","les","tu","su","sus","mi","mis","que"]);
+const BRAND_WORDS = new Set(["deliplus","nivea","sisbela","florena"]);
+
+// Construir índice de búsqueda del catálogo
+const productIndex = catalog.map(prod => {
+    const nameNorm = normalizeText(prod.name);
+    const keywords = new Set(nameNorm.split(' ').filter(w => !SPANISH_STOPWORDS.has(w) && !BRAND_WORDS.has(w)));
+    return { 
+        id: prod.id,
+        name: prod.name,
+        keywords: keywords,
+        data: prod  // guardar referencia al producto completo
     };
-  });
-}
-
-function loadCatalog() {
-  PRODUCTS = loadCatalogFromFile();
-  CATALOG_OK = PRODUCTS.length > 3;
-
-  if (!CATALOG_OK) {
-    PRODUCTS = [];
-    console.log("⚠️ Catálogo NO cargado. Se bloqueará el bot AI.");
-    return;
-  }
-
-  buildIndex();
-}
-loadCatalog();
-
-// =============================
-// UPSTASH REDIS (simple)
-// =============================
-async function redisGet(key) {
-  if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return null;
-
-  const url = `${UPSTASH_REDIS_REST_URL}/get/${encodeURIComponent(key)}`;
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` },
-  });
-  const data = await res.json();
-  if (!res.ok) return null;
-  if (!data?.result) return null;
-
-  try {
-    return JSON.parse(data.result);
-  } catch {
-    return data.result;
-  }
-}
-
-async function redisSet(key, value, ttlSeconds = MEMORY_TTL_SECONDS) {
-  if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return;
-
-  const payload = typeof value === "string" ? value : JSON.stringify(value);
-
-  const url = `${UPSTASH_REDIS_REST_URL}/set/${encodeURIComponent(
-    key
-  )}/${encodeURIComponent(payload)}?EX=${ttlSeconds}`;
-
-  await fetch(url, {
-    headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` },
-  });
-}
-
-async function redisDel(key) {
-  if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return;
-  const url = `${UPSTASH_REDIS_REST_URL}/del/${encodeURIComponent(key)}`;
-  await fetch(url, {
-    headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` },
-  });
-}
-
-const K = {
-  mem: (wa) => `glowny:mem:${wa}`,
-  ctx: (wa) => `glowny:ctx:${wa}`, // carrito + datos entrega + producto actual
-  lock: (wa) => `glowny:lock:${wa}`,
-};
-
-// =============================
-// HELPERS
-// =============================
-function money(n) {
-  return `RD$${Number(n || 0).toLocaleString("en-US")}`;
-}
-
-function getProductById(id) {
-  return PRODUCTS.find((p) => p.id === id) || null;
-}
-
-function safeProduct(prod) {
-  if (!prod) return null;
-  return {
-    id: prod.id,
-    name: prod.name,
-    category: prod.category || "",
-    type: prod.type || "",
-    price: prod.price || 0,
-    in_stock: !!prod.in_stock,
-    description: prod.description || "",
-    how_to_use: prod.how_to_use || "",
-    duration_text: prod.duration_text || "",
-    warnings: prod.warnings || "",
-    ingredients: prod.ingredients || "",
-    image: prod.image || "",
-  };
-}
-
-function findProducts(query) {
-  if (!CATALOG_OK) return [];
-
-  const q = normalizeText(query);
-  if (!q) return [];
-
-  const qWords = q.split(" ").filter(Boolean);
-  if (!qWords.length) return [];
-
-  const scored = productIndex
-    .map((p) => {
-      let score = 0;
-
-      if (p.normName.includes(q)) score += 12;
-
-      const hits = qWords.filter((w) => p.wordSet.has(w)).length;
-      score += hits;
-
-      if (p.category && q.includes(normalizeText(p.category))) score += 2;
-      if (p.type && q.includes(normalizeText(p.type))) score += 2;
-
-      return { p, score };
-    })
-    .filter((x) => x.score >= 2)
-    .sort((a, b) => b.score - a.score);
-
-  return scored.slice(0, 5).map((x) => x.p);
-}
-
-function extractQty(text) {
-  const q = normalizeText(text);
-  const m = q.match(/\b(\d{1,2})\b/);
-  if (!m) return null;
-  const n = Number(m[1]);
-  if (Number.isFinite(n) && n > 0) return n;
-  return null;
-}
-
-function extractPayment(text) {
-  const q = normalizeText(text);
-  if (q.includes("contra entrega") || q.includes("efectivo") || q.includes("cash"))
-    return "Contra entrega";
-  if (q.includes("transfer") || q.includes("tarjeta") || q.includes("deposito"))
-    return "Transferencia";
-  return null;
-}
-
-function isGreeting(text) {
-  const q = normalizeText(text);
-  return (
-    q === "hola" ||
-    q === "buenas" ||
-    q.includes("buenos dias") ||
-    q.includes("buenas noches") ||
-    q.includes("buenas tardes")
-  );
-}
-
-function isShowCart(text) {
-  const q = normalizeText(text);
-  return (
-    q.includes("carrito") ||
-    q.includes("que compre") ||
-    q.includes("que compré") ||
-    q.includes("que tengo") ||
-    q.includes("muestrame") ||
-    q.includes("muéstrame") ||
-    q.includes("mi pedido") ||
-    q.includes("pedido actual")
-  );
-}
-
-function isConfirm(text) {
-  const q = normalizeText(text);
-
-  // Confirmación explícita
-  if (
-    q === "confirmar" ||
-    q === "confirmo" ||
-    q.includes("confirmar") ||
-    q.includes("confirmo") ||
-    q.includes("finalizar") ||
-    q.includes("procesar") ||
-    q.includes("confirmar pedido") ||
-    q.includes("confirmar el pedido") ||
-    q.includes("hacer el pedido") ||
-    q.includes("ya estoy lista") ||
-    q.includes("ya") ||
-    q === "listo"
-  ) return true;
-
-  // Confirmación corta (clientes suelen responder así)
-  return (
-    q === "si" ||
-    q === "sí" ||
-    q === "ok" ||
-    q === "oka" ||
-    q === "okay" ||
-    q === "dale" ||
-    q === "va" ||
-    q === "perfecto" ||
-    q === "de acuerdo" ||
-    q === "listo" ||
-    q === "listaa" ||
-    q === "okey"
-  );
-}
-
-
-function isAddToCart(text) {
-  const q = normalizeText(text);
-  return (
-    q === "pedir" ||
-    q.includes("lo quiero") ||
-    q.includes("lo llevo") ||
-    q.includes("agregalo") ||
-    q.includes("agregar") ||
-    q.includes("añadir") ||
-    q.includes("sumalo") ||
-    q.includes("sumar") ||
-    q.includes("quiero ese") ||
-    q.includes("quiero este")
-  );
-}
-
-function isClearCart(text) {
-  const q = normalizeText(text);
-  return (
-    q.includes("cancelar") ||
-    q.includes("eliminar pedido") ||
-    q.includes("vaciar carrito") ||
-    q.includes("borra el carrito")
-  );
-}
-
-// =============================
-// CONTEXTO (carrito + datos)
-// =============================
-async function getCtx(wa) {
-  const ctx = (await redisGet(K.ctx(wa))) || {};
-  const cart = Array.isArray(ctx.cart) ? ctx.cart : [];
-  return {
-    cart,
-    current_product_id: ctx.current_product_id || null,
-    location: ctx.location || null,
-    reference: ctx.reference || null,
-    payment: ctx.payment || null,
-  };
-}
-
-async function setCtx(wa, ctx) {
-  await redisSet(K.ctx(wa), ctx);
-}
-
-function cartSummaryLines(cart) {
-  const lines = [];
-  let total = 0;
-
-  for (const item of cart) {
-    const prod = getProductById(item.product_id);
-    if (!prod) continue;
-    const qty = Number(item.qty || 1);
-    const sub = (Number(prod.price || 0) * qty) || 0;
-    total += sub;
-    lines.push(`• ${qty}x ${prod.name} — ${money(sub)}`);
-  }
-
-  return { lines, total };
-}
-
-function missingDeliveryFields(ctx) {
-  const missing = [];
-  if (!ctx.location) missing.push("location");
-  if (!ctx.reference) missing.push("reference");
-  if (!ctx.payment) missing.push("payment");
-  return missing;
-}
-
-// =============================
-// META ADS / REFERRAL DETECTION
-// =============================
-function extractAdTextFromMessage(message) {
-  const ref = message?.referral || message?.context?.referral;
-  if (!ref) return "";
-  const parts = [];
-  if (ref.headline) parts.push(ref.headline);
-  if (ref.body) parts.push(ref.body);
-  if (ref.source_url) parts.push(ref.source_url);
-  if (ref.product_description) parts.push(ref.product_description);
-  return parts.filter(Boolean).join(" ");
-}
-
-// =============================
-// OPENAI (JSON decision)
-// =============================
-function getSystemPrompt() {
-  return `
-Eres una asistente de ventas por WhatsApp de "Glowny Essentials" en República Dominicana.
-
-OBJETIVO:
-- Ayudar a clientas (muchas mayores) a pedir con mensajes "raros" o preguntas.
-- Responder con info útil del PRODUCTO usando el catálogo.
-- NUNCA inventes (si no está en el catálogo, dilo).
-
-ESTILO:
-- Femenino suave, profesional, 2 a 7 líneas.
-- NO uses "mi amor".
-- Emojis suaves: 😊✨💗🛒📍💳⏳🥄✅
-
-REGLAS CLAVE:
-1) Si NO hay producto en carrito, NO pidas ubicación ni pago.
-2) Si el cliente dice "PEDIR/LO QUIERO" pero no hay producto claro, pide el nombre del producto o sugiere 3 categorías.
-3) Si el cliente quiere confirmar y ya hay carrito:
-   - Si falta ubicación: pide ubicación 📍
-   - Si falta referencia: pide referencia breve
-   - Si falta pago: pregunta contra entrega o transferencia
-   - Si ya está todo: confirma el pedido ✅
-4) Si preguntan "qué compré / qué tengo en el carrito", muestra el resumen y da opción de confirmar.
-5) Si pregunta uso/duración/ingredientes: responde con catálogo. Si un campo está vacío, di: "No tengo ese dato exacto ahora mismo ✅" y da guía general sin inventar.
-
-IMPORTANTE:
-Responde SIEMPRE en JSON válido con esta forma EXACTA:
-
-{
-  "reply": "texto al cliente",
-  "intent": "info|show_cart|add_to_cart|confirm_order|set_reference|set_payment|greeting|other|clear_cart",
-  "product_id": "id_del_producto_o_vacio",
-  "qty": 1,
-  "reference": "texto_o_vacio",
-  "payment": "Contra entrega|Transferencia|",
-  "needs_location": false,
-  "finalize_now": false
-}
-
-No agregues texto fuera del JSON.
-`;
-}
-
-async function callOpenAI({ history, userText, ctx, candidates }) {
-  if (!OPENAI_API_KEY) {
-    return {
-      reply: "Hola 😊✨ ¿Qué producto estás buscando hoy? Escríbeme el nombre 💗",
-      intent: "greeting",
-      product_id: "",
-      qty: 1,
-      reference: "",
-      payment: "",
-      needs_location: false,
-      finalize_now: false,
-    };
-  }
-
-  const cart = ctx.cart || [];
-  const cartSummary = cartSummaryLines(cart);
-
-  const payloadContext = {
-    cart: cart.map((it) => ({
-      product_id: it.product_id,
-      qty: it.qty,
-      name: getProductById(it.product_id)?.name || "",
-      price: getProductById(it.product_id)?.price || 0,
-    })),
-    cart_total: cartSummary.total,
-    current_product: safeProduct(getProductById(ctx.current_product_id)),
-    delivery: {
-      has_location: !!ctx.location,
-      reference: ctx.reference || "",
-      payment: ctx.payment || "",
-    },
-    candidates: (candidates || []).slice(0, 5).map(safeProduct),
-  };
-
-  const messages = [
-    { role: "system", content: getSystemPrompt() },
-    ...(Array.isArray(history) ? history.slice(-MAX_HISTORY_MESSAGES) : []),
-    { role: "system", content: `CONTEXTO:\n${JSON.stringify(payloadContext, null, 2)}` },
-    { role: "user", content: userText },
-  ];
-
-  const payload = {
-    model: MODEL,
-    messages,
-    temperature: 0.2,
-    max_tokens: 260,
-  };
-
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    return {
-      reply: "😥 Ahora mismo tuve un inconveniente. ¿Me lo repites por favor?",
-      intent: "other",
-      product_id: "",
-      qty: 1,
-      reference: "",
-      payment: "",
-      needs_location: false,
-      finalize_now: false,
-    };
-  }
-
-  const raw = data.choices?.[0]?.message?.content?.trim() || "";
-
-  try {
-    const parsed = JSON.parse(raw);
-    return {
-      reply: String(parsed.reply || "").trim(),
-      intent: String(parsed.intent || "other"),
-      product_id: String(parsed.product_id || "").trim(),
-      qty: Number(parsed.qty || 1) || 1,
-      reference: String(parsed.reference || "").trim(),
-      payment: String(parsed.payment || "").trim(),
-      needs_location: !!parsed.needs_location,
-      finalize_now: !!parsed.finalize_now,
-    };
-  } catch {
-    return {
-      reply: raw || "😊✨ ¿Qué producto estás buscando? Escríbeme el nombre 💗",
-      intent: "other",
-      product_id: "",
-      qty: 1,
-      reference: "",
-      payment: "",
-      needs_location: false,
-      finalize_now: false,
-    };
-  }
-}
-
-// =============================
-// MEMORIA conversacional
-// =============================
-async function getMemory(wa) {
-  const mem = (await redisGet(K.mem(wa))) || [];
-  return Array.isArray(mem) ? mem : [];
-}
-
-async function saveMemory(wa, history) {
-  await redisSet(K.mem(wa), history.slice(-MAX_HISTORY_MESSAGES));
-}
-
-// =============================
-// WHATSAPP SENDERS
-// =============================
-async function sendWhatsAppMessage(to, text) {
-  const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
-  const body = {
-    messaging_product: "whatsapp",
-    to,
-    type: "text",
-    text: { body: text },
-  };
-
-  await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${WA_TOKEN}`,
-    },
-    body: JSON.stringify(body),
-  });
-}
-
-// =============================
-// HEALTH
-// =============================
-app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-    catalog_ok: CATALOG_OK,
-    products: PRODUCTS.length,
-    model: MODEL,
-    has_upstash: !!UPSTASH_REDIS_REST_URL,
-  });
 });
 
-// =============================
-// WEBHOOK VERIFY
-// =============================
-app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
-  }
-  return res.sendStatus(403);
-});
-
-// =============================
-// ADMIN MESSAGE (pedido confirmado)
-// =============================
-async function sendAdminOrder(from, ctx) {
-  const cartSum = cartSummaryLines(ctx.cart);
-  let adminText = `📦 NUEVO PEDIDO - Glowny Essentials ✅\n\n`;
-
-  for (const line of cartSum.lines) adminText += `${line}\n`;
-
-  adminText += `\n💰 Total: ${money(cartSum.total)}\n`;
-  adminText += `💳 Pago: ${ctx.payment || "No indicado"}\n`;
-  adminText += `📍 Referencia: ${ctx.reference || "No indicada"}\n`;
-  adminText += `WhatsApp: ${from}\nhttps://wa.me/${from}\n`;
-
-  if (ctx.location?.lat && ctx.location?.lon) {
-    adminText += `\n📍 Ubicación:\nhttps://www.google.com/maps?q=${ctx.location.lat},${ctx.location.lon}\n`;
-  }
-
-  await sendWhatsAppMessage(ADMIN_PHONE, adminText);
-}
-
-// =============================
-// MAIN WEBHOOK (AI-first, no hard flows)
-// =============================
-app.post("/webhook", async (req, res) => {
-  const safeEnd = async (lockKey) => {
-    try {
-      if (lockKey) await redisDel(lockKey);
-    } catch {}
-    return res.sendStatus(200);
-  };
-
-  try {
-    const entry = req.body?.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value = changes?.value;
-    const message = value?.messages?.[0];
-
-    if (!message) return res.sendStatus(200);
-
-    const from = message.from;
-
-    // lock anti doble respuesta
-    const lockKey = K.lock(from);
-    const lock = await redisGet(lockKey);
-    if (lock) return res.sendStatus(200);
-    await redisSet(lockKey, "1", 2);
-
-    // Sin catálogo
-    if (!CATALOG_OK) {
-      await sendWhatsAppMessage(
-        from,
-        "✨ Estamos actualizando el catálogo en este momento 😊\nIntenta de nuevo en 1 minutito 🙏"
-      );
-      return safeEnd(lockKey);
-    }
-
-    // Ctx actual
-    const ctx = await getCtx(from);
-
-    // =============================
-    // 1) Si viene de anuncio (referral) -> set producto actual
-    // =============================
-    const adText = extractAdTextFromMessage(message);
-    if (adText) {
-      const adMatches = findProducts(adText);
-      if (adMatches.length >= 1) {
-        const prod = adMatches[0];
-        ctx.current_product_id = prod.id;
-        await setCtx(from, ctx);
-      }
-    }
-
-    // =============================
-    // 2) Si es ubicación -> guardar y responder sin repetir
-    // =============================
-    if (message.type === "location" && message.location) {
-      ctx.location = {
-        lat: message.location.latitude,
-        lon: message.location.longitude,
-        address: message.location.address || "",
-        name: message.location.name || "",
-      };
-      await setCtx(from, ctx);
-
-      if (!ctx.cart?.length) {
-        await sendWhatsAppMessage(from, "📍 Ubicación recibida ✅\nAhora dime qué producto deseas pedir 😊🛒");
-        return safeEnd(lockKey);
-      }
-
-      const missing = missingDeliveryFields(ctx);
-      if (missing.includes("reference")) {
-        await sendWhatsAppMessage(from, "✅ ¡Gracias! 😊\nAhora dime una referencia breve (Ej: cerca del colmado) 📍");
-        return safeEnd(lockKey);
-      }
-      if (missing.includes("payment")) {
-        await sendWhatsAppMessage(from, "💳 Perfecto ✅\n¿El pago será contra entrega o transferencia? 😊");
-        return safeEnd(lockKey);
-      }
-
-      await sendWhatsAppMessage(from, "✅ Perfecto 😊\nYa tenemos todo. Escribe *CONFIRMAR* para finalizar tu pedido 🛒💗");
-      return safeEnd(lockKey);
-    }
-
-    // Texto normal
-    const userText = message.text?.body || "";
-    const normText = normalizeText(userText);
-
-    // =============================
-    // 3) Capturar pago / referencia aunque el usuario lo escriba suelto
-    // =============================
-    const pay = extractPayment(userText);
-    if (pay) {
-      ctx.payment = pay;
-      await setCtx(from, ctx);
-    }
-
-    if (ctx.location && !ctx.reference) {
-      const looksLikeQuestion =
-        userText.includes("?") ||
-        normText.startsWith("como") ||
-        normText.startsWith("que") ||
-        normText.startsWith("cuanto") ||
-        normText.startsWith("donde") ||
-        normText.startsWith("cual") ||
-        normText.startsWith("cuál");
-      if (!looksLikeQuestion && normText.length > 2 && normText.length <= 60) {
-        ctx.reference = userText.trim();
-        await setCtx(from, ctx);
-      }
-    }
-
-    // =============================
-    // 4) Mostrar carrito rápido
-    // =============================
-    if (isShowCart(userText)) {
-      if (!ctx.cart?.length) {
-        await sendWhatsAppMessage(from, "🛒 Tu carrito está vacío 😊\nDime el nombre del producto que deseas 💗");
-        return safeEnd(lockKey);
-      }
-
-      const sum = cartSummaryLines(ctx.cart);
-      const body = `🛒 Tu carrito:\n${sum.lines.join("\n")}\n\n💰 Total: ${money(sum.total)}\n\n✅ Escribe *CONFIRMAR* para finalizar o dime si deseas agregar otro producto 😊✨`;
-      await sendWhatsAppMessage(from, body);
-      return safeEnd(lockKey);
-    }
-
-    // =============================
-    // 5) Vaciar carrito
-    // =============================
-    if (isClearCart(userText)) {
-      await redisDel(K.ctx(from));
-      await sendWhatsAppMessage(from, "✅ Listo 😊\nTu carrito fue vaciado. ¿Qué producto te gustaría ahora? 💗🛒");
-      return safeEnd(lockKey);
-    }
-
-    // =============================
-    // 6) Confirmar pedido -> pedir SOLO lo que falta
-    // =============================
-    if (isConfirm(userText)) {
-      if (!ctx.cart?.length) {
-        await sendWhatsAppMessage(from, "🛒 Aún no tienes productos en el carrito 😊\nDime qué producto deseas pedir 💗");
-        return safeEnd(lockKey);
-      }
-
-      const missing = missingDeliveryFields(ctx);
-
-      if (missing.includes("location")) {
-        await sendWhatsAppMessage(from, "📍 Perfecto ✅\nEnvíame tu ubicación para coordinar la entrega 😊");
-        return safeEnd(lockKey);
-      }
-      if (missing.includes("reference")) {
-        await sendWhatsAppMessage(from, "✅ Gracias 😊\nAhora dime una referencia breve (Ej: cerca del colmado) 📍");
-        return safeEnd(lockKey);
-      }
-      if (missing.includes("payment")) {
-        await sendWhatsAppMessage(from, "💳 Perfecto ✅\n¿El pago será contra entrega o transferencia? 😊");
-        return safeEnd(lockKey);
-      }
-
-      const sum = cartSummaryLines(ctx.cart);
-      await sendWhatsAppMessage(from, `✅ Pedido confirmado 💗\nTotal: ${money(sum.total)}\nEn breve te lo coordinamos 😊`);
-      await sendAdminOrder(from, ctx);
-      await redisDel(K.ctx(from));
-      return safeEnd(lockKey);
-    }
-
-    // =============================
-    // 7) PEDIR / LO QUIERO -> agregar al carrito
-    // =============================
-    if (isAddToCart(userText)) {
-      const qty = extractQty(userText) || 1;
-
-      if (ctx.current_product_id) {
-        const prod = getProductById(ctx.current_product_id);
-        if (prod) {
-          ctx.cart = Array.isArray(ctx.cart) ? ctx.cart : [];
-          const existing = ctx.cart.find((x) => x.product_id === prod.id);
-          if (existing) existing.qty = Number(existing.qty || 1) + qty;
-          else ctx.cart.push({ product_id: prod.id, qty });
-
-          await setCtx(from, ctx);
-
-          const sum = cartSummaryLines(ctx.cart);
-          await sendWhatsAppMessage(
-            from,
-            `✅ Agregado al carrito 😊🛒\n${qty}x ${prod.name}\n\n💰 Total actual: ${money(sum.total)}\nEscribe *CONFIRMAR* para finalizar o dime si deseas agregar otro 💗`
-          );
-          return safeEnd(lockKey);
+// Buscar el producto en el catálogo más relevante al mensaje del cliente
+function findProductForMessage(message) {
+    const msgNorm = normalizeText(message);
+    const msgWords = new Set(msgNorm.split(' ').filter(w => !SPANISH_STOPWORDS.has(w) && !BRAND_WORDS.has(w)));
+    let bestMatch = null;
+    let bestScore = 0;
+    for (const item of productIndex) {
+        // calcular intersección de palabras clave
+        const commonWordsCount = [...msgWords].filter(w => item.keywords.has(w)).length;
+        if (commonWordsCount > bestScore) {
+            bestScore = commonWordsCount;
+            bestMatch = item;
         }
-      }
-
-      const matches = findProducts(userText);
-      if (matches.length === 1) {
-        const prod = matches[0];
-        ctx.current_product_id = prod.id;
-        ctx.cart = Array.isArray(ctx.cart) ? ctx.cart : [];
-        ctx.cart.push({ product_id: prod.id, qty });
-        await setCtx(from, ctx);
-
-        const sum = cartSummaryLines(ctx.cart);
-        await sendWhatsAppMessage(
-          from,
-          `✅ Agregado al carrito 😊🛒\n${qty}x ${prod.name}\n\n💰 Total actual: ${money(sum.total)}\nEscribe *CONFIRMAR* para finalizar o dime si deseas agregar otro 💗`
-        );
-        return safeEnd(lockKey);
-      }
-
-      await sendWhatsAppMessage(
-        from,
-        "🛒 ¡Claro! 😊\nDime el nombre del producto que deseas pedir (Ej: gel aloe, colágeno, protector solar) 💗"
-      );
-      return safeEnd(lockKey);
     }
-
-    // =============================
-    // 8) Detectar producto por texto y set current_product
-    // =============================
-    const matches = findProducts(userText);
-    if (matches.length === 1) {
-      const prod = matches[0];
-      ctx.current_product_id = prod.id;
-      await setCtx(from, ctx);
-
-      const lines = [];
-      lines.push(`💗 ${prod.name}`);
-      lines.push(`Precio: ${money(prod.price)}`);
-      const d = (prod.description || "").trim();
-      if (d) lines.push(`✨ ${d.split("\n")[0].slice(0, 90)}`);
-      lines.push("🛒 Si deseas pedirlo, escribe: PEDIR");
-
-      await sendWhatsAppMessage(from, lines.join("\n"));
-      return safeEnd(lockKey);
+    // Considerar match válido solo si al menos una palabra coincide
+    if (bestScore === 0) {
+        return null;
     }
+    return bestMatch;
+}
 
-    if (matches.length > 1 && normText.length > 2) {
-      const list = matches
-        .slice(0, 4)
-        .map((p) => `• ${p.name} — ${money(p.price)}`)
-        .join("\n");
-      await sendWhatsAppMessage(from, `✨ Encontré estas opciones:\n${list}\n\nEscríbeme cuál te interesa 😊💗`);
-      return safeEnd(lockKey);
+// Funciones para manejar la memoria de conversación usando Upstash Redis
+async function getSession(userId) {
+    if (!UPSTASH_URL || !UPSTASH_TOKEN) {
+        return null;
     }
-
-    // =============================
-    // 9) IA para todo lo demás
-    // =============================
-    const history = await getMemory(from);
-    const ai = await callOpenAI({
-      history,
-      userText,
-      ctx,
-      candidates: matches,
-    });
-
-    const newHistory = [
-      ...history,
-      { role: "user", content: userText },
-      { role: "assistant", content: ai.reply || "" },
-    ];
-    await saveMemory(from, newHistory);
-
-    // acciones ligeras
-    if (ai.intent === "set_payment" && ai.payment) {
-      ctx.payment = ai.payment;
-      await setCtx(from, ctx);
+    try {
+        // Comando Redis GET para la clave de sesión de este usuario
+        const res = await axios.post(UPSTASH_URL, ["GET", `session:${userId}`], {
+            headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` }
+        });
+        if (res.data && res.data.result) {
+            return JSON.parse(res.data.result);
+        }
+    } catch (error) {
+        console.error("Error obteniendo sesión de Redis:", error);
     }
-    if (ai.intent === "set_reference" && ai.reference) {
-      ctx.reference = ai.reference;
-      await setCtx(from, ctx);
+    return null;
+}
+
+async function setSession(userId, sessionData) {
+    if (!UPSTASH_URL || !UPSTASH_TOKEN) {
+        return;
     }
-    if (ai.intent === "add_to_cart" && ai.product_id) {
-      const prod = getProductById(ai.product_id);
-      if (prod) {
-        ctx.current_product_id = prod.id;
-        ctx.cart = Array.isArray(ctx.cart) ? ctx.cart : [];
-        const qty = Number(ai.qty || 1) || 1;
-        const existing = ctx.cart.find((x) => x.product_id === prod.id);
-        if (existing) existing.qty = Number(existing.qty || 1) + qty;
-        else ctx.cart.push({ product_id: prod.id, qty });
-        await setCtx(from, ctx);
-      }
+    try {
+        // Guardar la sesión como JSON en Redis
+        await axios.post(UPSTASH_URL, ["SET", `session:${userId}`, JSON.stringify(sessionData)], {
+            headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` }
+        });
+    } catch (error) {
+        console.error("Error guardando sesión en Redis:", error);
     }
+}
 
-    if (ai.finalize_now) {
-      if (!ctx.cart?.length) {
-        await sendWhatsAppMessage(from, "🛒 Aún no tienes productos en el carrito 😊\nDime cuál deseas 💗");
-        return safeEnd(lockKey);
-      }
-
-      const missing = missingDeliveryFields(ctx);
-      if (missing.includes("location")) {
-        await sendWhatsAppMessage(from, "📍 Perfecto ✅\nEnvíame tu ubicación para coordinar la entrega 😊");
-        return safeEnd(lockKey);
-      }
-      if (missing.includes("reference")) {
-        await sendWhatsAppMessage(from, "✅ Gracias 😊\nAhora dime una referencia breve (Ej: cerca del colmado) 📍");
-        return safeEnd(lockKey);
-      }
-      if (missing.includes("payment")) {
-        await sendWhatsAppMessage(from, "💳 Perfecto ✅\n¿El pago será contra entrega o transferencia? 😊");
-        return safeEnd(lockKey);
-      }
-
-      const sum = cartSummaryLines(ctx.cart);
-      await sendWhatsAppMessage(from, `✅ Pedido confirmado 💗\nTotal: ${money(sum.total)}\nEn breve te lo coordinamos 😊`);
-      await sendAdminOrder(from, ctx);
-      await redisDel(K.ctx(from));
-      return safeEnd(lockKey);
+// Funciones auxiliares para enviar mensajes por WhatsApp Cloud API
+async function sendWhatsAppText(to, text) {
+    try {
+        await axios({
+            method: 'POST',
+            url: `https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`,
+            headers: { Authorization: `Bearer ${WA_TOKEN}` },
+            data: {
+                recipient_type: "individual",
+                to: to,
+                type: "text",
+                text: { body: text }
+            }
+        });
+    } catch (error) {
+        console.error("Error enviando mensaje de texto:", error.response ? error.response.data : error);
     }
+}
 
-    if (ai.reply && ai.reply.trim().length) {
-      await sendWhatsAppMessage(from, ai.reply.trim());
-      return safeEnd(lockKey);
+async function sendWhatsAppImage(to, imageUrl, caption) {
+    try {
+        await axios({
+            method: 'POST',
+            url: `https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`,
+            headers: { Authorization: `Bearer ${WA_TOKEN}` },
+            data: {
+                recipient_type: "individual",
+                to: to,
+                type: "image",
+                image: { link: imageUrl, caption: caption || "" }
+            }
+        });
+    } catch (error) {
+        console.error("Error enviando imagen:", error.response ? error.response.data : error);
     }
+}
 
-    if (isGreeting(userText)) {
-      await sendWhatsAppMessage(from, "¡Hola! 😊✨\n¿Qué producto estás buscando hoy? Escríbeme el nombre 💗");
-      return safeEnd(lockKey);
+async function sendWhatsAppButtons(to, text, buttons) {
+    // 'buttons' es un array de objetos { id: ..., title: ... }
+    try {
+        await axios({
+            method: 'POST',
+            url: `https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`,
+            headers: { Authorization: `Bearer ${WA_TOKEN}` },
+            data: {
+                recipient_type: "individual",
+                to: to,
+                type: "interactive",
+                interactive: {
+                    type: "button",
+                    body: { text: text },
+                    action: {
+                        buttons: buttons.map(btn => ({
+                            type: "reply",
+                            reply: { id: btn.id, title: btn.title }
+                        }))
+                    }
+                }
+            }
+        });
+    } catch (error) {
+        console.error("Error enviando botones interactivos:", error.response ? error.response.data : error);
     }
+}
 
-    await sendWhatsAppMessage(from, "😊✨ Escríbeme el nombre del producto y te ayudo con precio y detalles 💗");
-    return safeEnd(lockKey);
-  } catch (err) {
-    console.error("❌ Error webhook:", err);
-    return res.sendStatus(200);
-  }
+// Ruta GET para la verificación del webhook (suscripción de Webhook de WhatsApp)
+app.get('/webhook', (req, res) => {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+    if (mode && token) {
+        if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+            console.log("Webhook verificado correctamente.");
+            return res.status(200).send(challenge);
+        } else {
+            return res.sendStatus(403);
+        }
+    }
+    return res.sendStatus(404);
 });
 
-// =============================
-const PORT = process.env.PORT || 10000;
+// Ruta POST para recibir mensajes entrantes de WhatsApp
+app.post('/webhook', async (req, res) => {
+    const body = req.body;
+    // Confirmar que el webhook es un evento de mensajes de WhatsApp
+    if (body.object === 'whatsapp_business_account') {
+        const entry = body.entry && body.entry[0];
+        const change = entry && entry.changes && entry.changes[0];
+        const value = change && change.value;
+        const messages = value && value.messages;
+        if (!messages || messages.length === 0) {
+            // No hay mensajes (puede ser una notificación de estado)
+            return res.sendStatus(200);
+        }
+
+        // Extraer datos del mensaje
+        const msg = messages[0];
+        const userPhone = msg.from;  // número del usuario
+        const msgType = msg.type;    // tipo de mensaje (text, image, interactive, etc.)
+        const customerName = (value.contacts && value.contacts[0] && value.contacts[0].profile && value.contacts[0].profile.name) || "";  // nombre del cliente si está en el perfil
+
+        // Obtener o iniciar la sesión de este usuario
+        let session = await getSession(userPhone) || {};
+        if (!session.history) session.history = [];
+        if (!session.order) session.order = {};
+        if (!session.state) session.state = "INIT";  // estado inicial
+
+        // Función auxiliar para llamar a la API de OpenAI con el historial y contexto
+        async function callOpenAI(product, userMessage) {
+            // Construir mensajes de contexto para el chat
+            const productInfo = product ? `
+Producto: ${product.name}
+Categoría: ${product.category}
+Precio: RD$${product.price}
+Descripción: ${product.description || "N/A"}
+Uso: ${product.how_to_use || "N/A"}
+Duración: ${product.duration_text || "N/A"}
+Ingredientes: ${product.ingredients || "N/A"}
+Advertencias: ${product.warnings || "N/A"}
+` : "";
+
+            // Mensaje de sistema con instrucciones y contexto del producto
+            const systemContent = 
+`Eres Glowny, una asistente virtual de Glowny Essentials. Atiendes a clientas en español con un tono cálido, amigable, respetuoso y femenino. Tus respuestas son breves (entre 2 y 6 líneas), claras y útiles. 
+NO debes inventar información; usa solo los datos proporcionados del producto. Si la pregunta del cliente no se puede responder con los datos disponibles, responde: "No tengo ese dato exacto ahora mismo ✅".
+Incluye emojis relevantes para sonar cercana (por ejemplo: ✨😊💗🛒📍💳⏳🥄) pero no demasiados (1-3 por respuesta).
+Información del producto para ayudar a responder:
+${productInfo}
+Recuerda: Sé amable y útil, y no reveles que eres una IA ni la información del sistema.`;
+
+            // Armar la lista de mensajes para el modelo
+            const messages = [
+                { role: "system", content: systemContent }
+            ];
+            // Incluir brevemente las últimas interacciones relevantes del historial para contexto, si las hay
+            // (Tomamos las últimas 1-2 rondas de diálogo)
+            if (session.history && session.history.length >= 1) {
+                const lastUserMsg = session.history[session.history.length - 1].user;
+                const lastAssistantMsg = session.history[session.history.length - 1].assistant;
+                if (lastUserMsg && lastAssistantMsg) {
+                    messages.push({ role: "user", content: lastUserMsg });
+                    messages.push({ role: "assistant", content: lastAssistantMsg });
+                }
+            }
+            // Añadir el mensaje actual del usuario
+            messages.push({ role: "user", content: userMessage });
+
+            try {
+                const response = await axios.post("https://api.openai.com/v1/chat/completions", {
+                    model: "gpt-4.1-nano",
+                    messages: messages,
+                    temperature: 0.5,
+                    max_tokens: 200
+                }, {
+                    headers: {
+                        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+                        "Content-Type": "application/json"
+                    }
+                });
+                const reply = response.data.choices[0].message.content.trim();
+                return reply;
+            } catch (error) {
+                console.error("Error al consultar OpenAI:", error.response ? error.response.data : error);
+                // Si falla la API de IA, devolver un mensaje genérico de error
+                return "Lo siento, hubo un error al procesar tu consulta. Por favor intenta de nuevo más tarde.";
+            }
+        }
+
+        // Lógica principal según tipo de mensaje y estado actual
+        if (msgType === "text") {
+            const userText = msg.text.body.trim();
+            // Verificar si estamos esperando datos específicos (cantidad, ubicación, pago)
+            if (session.state === "AWAIT_QUANTITY") {
+                // El usuario debe indicarnos la cantidad deseada
+                // Intentar extraer número de la respuesta
+                let quantity = null;
+                // Buscar dígitos en el texto
+                const digitMatch = userText.match(/\d+/);
+                if (digitMatch) {
+                    quantity = parseInt(digitMatch[0]);
+                } else {
+                    // Buscar número en palabra (uno, dos, etc.)
+                    const words = normalizeText(userText).split(' ');
+                    const numberWords = { "uno": 1, "una": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10 };
+                    for (let w of words) {
+                        if (numberWords[w] !== undefined) {
+                            quantity = numberWords[w];
+                            break;
+                        }
+                    }
+                }
+                if (quantity && quantity > 0) {
+                    session.order.quantity = quantity;
+                    // Responder confirmando cantidad y pedir ubicación
+                    await sendWhatsAppText(userPhone, `Perfecto, ${quantity} unidad(es) 🛒. Ahora, por favor envíame tu ubicación 📍 para coordinar la entrega (toca el clip 📎 y selecciona "Ubicación").`);
+                    // Actualizar estado a esperar ubicación
+                    session.state = "AWAIT_LOCATION";
+                } else {
+                    // No se entendió la cantidad, pedir nuevamente
+                    await sendWhatsAppText(userPhone, "Disculpa, no logré entender la cantidad. ¿Cuántas unidades deseas llevar? 🙏");
+                    // Permanecemos en AWAIT_QUANTITY
+                }
+            } else if (session.state === "AWAIT_LOCATION") {
+                // Se esperaba una ubicación pero recibimos texto
+                // Posiblemente la clienta no sabe enviar ubicación; damos instrucción de nuevo
+                await sendWhatsAppText(userPhone, "Por favor, envíame la ubicación usando el botón de adjuntar 📎 en WhatsApp y eligiendo \"Ubicación\". Es necesaria para coordinar la entrega. 🙏");
+                // (El estado sigue siendo AWAIT_LOCATION hasta que envíe ubicación)
+            } else if (session.state === "AWAIT_PAYMENT") {
+                // Esperábamos selección de pago, pero llegó texto
+                const payText = userText.toLowerCase();
+                let paymentMethod = null;
+                if (payText.includes("entrega") || payText.includes("efectivo")) {
+                    paymentMethod = "Contra entrega";
+                    session.order.payment = "Contra entrega";
+                } else if (payText.includes("transfer")) {
+                    paymentMethod = "Transferencia";
+                    session.order.payment = "Transferencia";
+                }
+                if (paymentMethod) {
+                    // Si identificamos el método de pago, procedemos a finalizar el pedido
+                    // (Reutilizamos la lógica de finalizar pedido más abajo)
+                } else {
+                    // No entendimos, volver a pedir elección
+                    await sendWhatsAppText(userPhone, "Por favor indícame si prefieres *contra entrega* o *transferencia* 💳. Puedes escribirlo o usar los botones anteriores. 😊");
+                    // Sigue en AWAIT_PAYMENT
+                }
+            }
+
+            // Manejo general de texto cuando no estamos en medio de una espera específica
+            if (session.state === "INIT" || session.state === "Q&A") {
+                // Revisar si el texto del usuario indica intención de compra directamente
+                const lowText = userText.toLowerCase();
+                const purchaseKeywords = ["comprar", "compro", "quiero comprar", "quiero llevar", "me lo llevo", "lo compro", "lo quiero"];
+                let wantsToBuy = purchaseKeywords.some(kw => lowText.includes(kw));
+                // Buscar si mencionó cantidad en el mismo mensaje de intención de compra
+                let mentionedQuantity = null;
+                const digitMatch = userText.match(/\d+/);
+                if (digitMatch) {
+                    mentionedQuantity = parseInt(digitMatch[0]);
+                } else {
+                    const words = normalizeText(userText).split(' ');
+                    const numberWordsMap = { "uno": 1, "una": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10 };
+                    for (let w of words) {
+                        if (numberWordsMap[w] !== undefined) {
+                            mentionedQuantity = numberWordsMap[w];
+                            break;
+                        }
+                    }
+                }
+
+                // Intentar identificar el producto mencionado (si aún no tenemos uno en sesión)
+                let currentProduct = session.product;
+                if (!currentProduct) {
+                    const found = findProductForMessage(userText);
+                    if (found) {
+                        currentProduct = found.data;
+                        session.product = currentProduct;
+                        session.state = "Q&A";  // entramos a estado de consulta sobre un producto
+                    }
+                } else {
+                    // Ya teníamos un producto en contexto, pero el usuario podría haber mencionado otro
+                    const maybeOther = findProductForMessage(userText);
+                    if (maybeOther && maybeOther.data.id !== currentProduct.id) {
+                        // Si detectamos otro producto, cambiamos el contexto al nuevo
+                        currentProduct = maybeOther.data;
+                        session.product = currentProduct;
+                        session.state = "Q&A";
+                        // Informar que cambiamos al nuevo producto (opcional)
+                        await sendWhatsAppText(userPhone, `Entendido, hablemos sobre *${currentProduct.name}*. 😊`);
+                    }
+                }
+
+                if (!currentProduct) {
+                    // No se pudo identificar ningún producto en el mensaje
+                    if (/hola|buenas/i.test(userText)) {
+                        // Si es un saludo general
+                        const greetingName = customerName ? `, ${customerName}` : "";
+                        await sendWhatsAppText(userPhone, `¡Hola${greetingName}! 😊 Soy Glowny, asistente virtual de Glowny Essentials. Cuéntame, ¿en qué producto estás interesada hoy?`);
+                    } else {
+                        // Preguntar gentilmente por más información sobre el producto
+                        await sendWhatsAppText(userPhone, "Disculpa, no logré identificar el producto que buscas 😔. ¿Podrías indicarme el nombre o describirlo? Por ejemplo: \"crema de manos de aloe\". 💗`);
+                    }
+                } else {
+                    // Tenemos un producto identificado
+                    if (wantsToBuy) {
+                        // La usuaria indicó que quiere comprar (o similar)
+                        // Si mencionó cantidad en el mismo mensaje, usarla; si no, preguntar
+                        if (mentionedQuantity && mentionedQuantity > 0) {
+                            session.order.quantity = mentionedQuantity;
+                            // Pedir ubicación directamente ya que tenemos cantidad
+                            await sendWhatsAppText(userPhone, `¡Genial! Anoté ${mentionedQuantity} unidad(es) de *${currentProduct.name}* 🛒. Ahora, por favor envíame tu ubicación 📍 para coordinar la entrega.`);
+                            session.state = "AWAIT_LOCATION";
+                        } else {
+                            // Preguntar cuántas unidades quiere
+                            await sendWhatsAppText(userPhone, `¡Genial! ✨ Te ayudaremos a comprar *${currentProduct.name}*. ¿Cuántas unidades quisieras llevar? 🛒`);
+                            session.state = "AWAIT_QUANTITY";
+                        }
+                    } else {
+                        // No es confirmación de compra, entonces usar IA para responder dudas sobre el producto
+                        const aiReply = await callOpenAI(currentProduct, userText);
+                        await sendWhatsAppText(userPhone, aiReply);
+                        // Almacenar en historial la pregunta y respuesta
+                        session.history.push({ user: userText, assistant: aiReply });
+                        // (Opcional: enviar imagen del producto si es la primera interacción sobre él)
+                        if (!session.sentImage && currentProduct.image) {
+                            // Enviar la imagen del producto con el nombre como pie de foto
+                            await sendWhatsAppImage(userPhone, currentProduct.image, currentProduct.name);
+                            session.sentImage = true;
+                        }
+                        // Permanecemos en estado Q&A para este producto
+                        session.state = "Q&A";
+                    }
+                }
+            }
+            // Si estábamos esperando pago y hemos identificado el método, la finalización del pedido se maneja después de procesar el texto...
+            if (session.state === "AWAIT_PAYMENT" && session.order.payment) {
+                // Pasamos a finalizar pedido
+            }
+        } else if (msgType === "interactive") {
+            // Mensaje interactivo (respuesta de un botón)
+            if (msg.interactive.type === "button_reply") {
+                const buttonId = msg.interactive.button_reply.id;
+                if (session.state === "AWAIT_PAYMENT") {
+                    if (buttonId === "pay_cash") {
+                        session.order.payment = "Contra entrega";
+                    } else if (buttonId === "pay_transfer") {
+                        session.order.payment = "Transferencia";
+                    }
+                    // Continuar para finalizar pedido
+                } else {
+                    // Otros botones (no previstos en este flujo)
+                    // Ignorar o manejar según sea necesario
+                }
+            } else if (msg.interactive.type === "list_reply") {
+                // Si se hubieran usado listas (no aplicable aquí), se podría manejar similarmente
+                // Ignorar en este caso
+            }
+        } else if (msgType === "location") {
+            // El usuario compartió una ubicación
+            const loc = msg.location;
+            if (session.state === "AWAIT_LOCATION") {
+                // Guardar la ubicación en el pedido
+                session.order.location = {
+                    latitude: loc.latitude,
+                    longitude: loc.longitude,
+                    name: loc.name || "",       // nombre de la ubicación si lo hay
+                    address: loc.address || ""   // dirección si la proporciona
+                };
+                // Ahora pedir método de pago
+                await sendWhatsAppText(userPhone, "Gracias por la ubicación 📍. Por último, ¿cómo prefieres pagar? 💳");
+                // Enviar botones para opciones de pago
+                await sendWhatsAppButtons(userPhone, "Elige el tipo de pago:", [
+                    { id: "pay_cash", title: "Contra entrega" },
+                    { id: "pay_transfer", title: "Transferencia" }
+                ]);
+                session.state = "AWAIT_PAYMENT";
+            } else if (session.state === "AWAIT_QUANTITY") {
+                // Si esperábamos cantidad pero la usuaria envió una ubicación, puede que haya saltado un paso
+                // Le recordamos que necesitamos la cantidad primero
+                await sendWhatsAppText(userPhone, "¡Gracias por la ubicación! 😊 Solo necesito que me digas cuántas unidades deseas para completar el pedido.");
+                // Mantenemos estado en AWAIT_QUANTITY
+            } else {
+                // Ubicación recibida fuera de contexto de pedido
+                await sendWhatsAppText(userPhone, "Recibí tu ubicación 👍. ¿Te gustaría realizar un pedido de algún producto? Si necesitas ayuda, estoy aquí. 😊");
+                // No cambiamos el estado actual, a menos que decidamos iniciar algo
+            }
+        }
+
+        // FINALIZACIÓN DEL PEDIDO (si ya tenemos método de pago seleccionado en session.order.payment)
+        if (session.state === "AWAIT_PAYMENT" && session.order.payment) {
+            // Todos los datos del pedido están recolectados: producto, cantidad, ubicación y pago
+            const order = session.order;
+            const productName = session.product ? session.product.name : "Producto desconocido";
+            const qty = order.quantity || 1;
+            const payMethod = order.payment;
+            // Mensaje de confirmación al cliente
+            const confirmationMsg = `✅ ¡Listo! Tu pedido de *${qty} x ${productName}* está registrado.\nTe contactaremos pronto para coordinar la entrega a la ubicación proporcionada.\nMétodo de pago: *${payMethod}*.\n¡Gracias por tu compra! 😊`;
+            await sendWhatsAppText(userPhone, confirmationMsg);
+            // Enviar detalles del pedido al ADMIN_PHONE
+            if (ADMIN_PHONE) {
+                // Construir enlace de Google Maps para la ubicación
+                let locationInfo = "";
+                if (order.location) {
+                    const { latitude, longitude, address, name } = order.location;
+                    const mapLink = `https://maps.google.com/?q=${latitude},${longitude}`;
+                    locationInfo = `Ubicación: ${name ? name + " - " : ""}${address ? address + " - " : ""}${mapLink}`;
+                }
+                const adminMsg = 
+`📦 *Nuevo pedido recibido* 📦
+Cliente: ${customerName || "Sin nombre"} (${userPhone})
+Producto: ${productName}
+Cantidad: ${qty}
+Pago: ${payMethod}
+${locationInfo ? locationInfo : ""}`;
+                await sendWhatsAppText(ADMIN_PHONE, adminMsg);
+            }
+            // Resetear la sesión (o marcarla como completada)
+            session.state = "INIT";
+            session.order = {};
+            session.history = [];
+            session.product = null;
+            session.sentImage = false;
+        }
+
+        // Responder al webhook inmediatamente
+        res.sendStatus(200);
+
+        // Guardar los cambios de sesión en la base de datos Redis
+        await setSession(userPhone, session);
+    } else {
+        // No es un evento de WhatsApp Business
+        res.sendStatus(404);
+    }
+});
+
+// Iniciar el servidor en el puerto configurado
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Bot Glowny (AI-first) corriendo en puerto ${PORT}`);
+    console.log(`⚡️ Bot de Glowny Essentials escuchando en el puerto ${PORT}`);
 });
