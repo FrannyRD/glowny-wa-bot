@@ -1,13 +1,18 @@
 {
-  "name": "glowny-wa-bot",
+  "name": "glowny-whatsapp-bot",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "Bot de WhatsApp usando Express, Axios, node-fetch, Upstash Redis y OpenAI",
   "type": "commonjs",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
-    "express": "^4.19.2",
-    "node-fetch": "^3.3.2"
+    "express": "^4.18.2",
+    "axios": "^1.5.0",
+    "node-fetch": "^3.3.1"
   }
 }
