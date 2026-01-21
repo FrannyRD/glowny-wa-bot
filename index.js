@@ -98,26 +98,7 @@ const CONFIRM_WORDS = new Set([
   "así mismo",
 ]);
 
-// ✅ Colores (si lo dicen suelto)
-const COLOR_WORDS = new Set([
-  "rosado",
-  "rosa",
-  "azul",
-  "amarillo",
-  "verde",
-  "morado",
-  "lila",
-  "blanco",
-  "negro",
-  "beige",
-  "dorado",
-  "plateado",
-  "naranja",
-  "rojo",
-  "gris",
-]);
-
-// ✅ Frases de compra naturales
+// ✅ Frases de compra naturales (señoras)
 const BUY_PHRASES = [
   "quiero ese",
   "quiero esa",
@@ -137,14 +118,9 @@ const BUY_PHRASES = [
   "mándamelo",
   "agregamelo",
   "agrégamelo",
-  "agregame ese",
-  "agrégame ese",
   "ponmelo",
   "pónmelo",
-  "ponme ese",
-  "pónme ese",
   "si lo quiero",
-  "si lo compro",
   "si ese",
   "si esa",
   "ese mismo",
@@ -155,7 +131,6 @@ const BUY_PHRASES = [
   "esa de ahí",
 ];
 
-// ✅ Número en palabras
 const NUMBER_WORDS = {
   cero: 0,
   un: 1,
@@ -174,7 +149,7 @@ const NUMBER_WORDS = {
   doce: 12,
 };
 
-// ✅ Extraer cantidad
+// ✅ Extraer cantidad del mensaje
 function extractQuantity(rawText) {
   const text = normalizeText(rawText);
   if (!text) return null;
@@ -195,11 +170,10 @@ function extractQuantity(rawText) {
   return null;
 }
 
-// ✅ Confirmación simple (sí/ok/dale)
+// ✅ Confirmación simple
 function isSimpleConfirmation(rawText) {
   const t = normalizeText(rawText);
   if (!t) return false;
-
   if (CONFIRM_WORDS.has(t)) return true;
 
   const words = t.split(" ").filter(Boolean);
@@ -225,32 +199,12 @@ function isReferencingPreviousProduct(rawText) {
     if (t.includes(p)) return true;
   }
 
-  if (
-    t.includes("de la foto") ||
-    t.includes("de la imagen") ||
-    t.includes("de la fotografia")
-  )
-    return true;
+  if (t.includes("de la foto") || t.includes("de la imagen")) return true;
 
   const words = t.split(" ").filter(Boolean);
-
   if (
     words.length === 1 &&
     (words[0] === "ese" || words[0] === "esa" || words[0] === "eso")
-  )
-    return true;
-
-  if (
-    words.length === 2 &&
-    (words[0] === "el" || words[0] === "la") &&
-    COLOR_WORDS.has(words[1])
-  )
-    return true;
-
-  if (
-    words.length === 2 &&
-    (words[0] === "ese" || words[0] === "esa") &&
-    COLOR_WORDS.has(words[1])
   )
     return true;
 
@@ -294,7 +248,6 @@ function fuzzyWordMatch(word, keyword) {
 
   const dist = levenshtein(word, keyword);
   const maxDist = keyword.length <= 6 ? 1 : 2;
-
   return dist <= maxDist;
 }
 
@@ -313,9 +266,11 @@ const productIndex = catalog.map((prod) => {
     name: prod.name,
     keywords,
     data: prod,
+    nameNorm,
   };
 });
 
+// ✅ Encontrar 1 mejor producto
 function findProductForMessage(message) {
   const msgNorm = normalizeText(message);
   const msgWordsArr = msgNorm
@@ -349,6 +304,24 @@ function findProductForMessage(message) {
 
   if (bestScore < 2) return null;
   return bestMatch;
+}
+
+// ✅ Buscar MULTIPLES productos por palabra (“aloe”, “magnesio”, etc.)
+function findProductsByKeyword(message) {
+  const msgNorm = normalizeText(message);
+  const words = msgNorm
+    .split(" ")
+    .filter((w) => w && !SPANISH_STOPWORDS.has(w) && !BRAND_WORDS.has(w));
+
+  // Si el texto es corto (ej: “aloe”), hacemos lista
+  if (words.length === 0) return [];
+  const key = words[0];
+
+  const matches = productIndex
+    .filter((p) => p.nameNorm.includes(key))
+    .map((p) => p.data);
+
+  return matches;
 }
 
 // =============================
@@ -441,7 +414,52 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
 }
 
 // =============================
-// OPENAI
+// ✅ AUDIO -> Descargar + Transcribir (OpenAI Whisper)
+// =============================
+async function getWhatsAppMediaUrl(mediaId) {
+  const url = `https://graph.facebook.com/v20.0/${mediaId}`;
+  const resp = await axios.get(url, {
+    headers: { Authorization: `Bearer ${WA_TOKEN}` },
+  });
+  return resp.data?.url;
+}
+
+async function downloadWhatsAppMediaBuffer(mediaUrl) {
+  const resp = await axios.get(mediaUrl, {
+    responseType: "arraybuffer",
+    headers: { Authorization: `Bearer ${WA_TOKEN}` },
+  });
+  return Buffer.from(resp.data);
+}
+
+async function transcribeAudioBuffer(buffer) {
+  // Usamos fetch nativo (Node 22 lo trae)
+  const form = new FormData();
+  const blob = new Blob([buffer], { type: "audio/ogg" });
+
+  form.append("file", blob, "audio.ogg");
+  form.append("model", "whisper-1");
+
+  const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: form,
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    console.error("❌ Error transcribiendo audio:", errText);
+    return "";
+  }
+
+  const data = await resp.json();
+  return (data.text || "").trim();
+}
+
+// =============================
+// OPENAI (texto)
 // =============================
 async function callOpenAI(session, product, userMessage) {
   const productInfo = product
@@ -463,10 +481,10 @@ Hablas en español, tono femenino suave, humano y servicial (ideal para señoras
 Respondes claro y corto (2 a 6 líneas). Usa 1-3 emojis suaves: ✨😊💗🛒📍
 
 REGLAS IMPORTANTES:
-- NUNCA uses "querida" ni frases parecidas.
-- NO inventes información. Solo usa el catálogo y el contexto.
+- NUNCA uses "querida".
+- NO inventes información. Solo usa el catálogo.
 - Si te falta un dato exacto di: "No tengo ese dato exacto ahora mismo ✅".
-- Si la clienta dice “sí/ok/dale/ese/el de la foto”, avanza el pedido con calma.
+- Si te dicen “sí/ok/dale/ese/el de la foto”, guía el pedido con calma.
 
 INFO DE PRODUCTO:
 ${productInfo}`;
@@ -526,6 +544,171 @@ app.get("/webhook", (req, res) => {
 });
 
 // =============================
+// ✅ FUNCIÓN CENTRAL PARA PROCESAR TEXTO
+// =============================
+async function processText(userPhone, customerName, session, userText) {
+  const lowText = normalizeText(userText);
+
+  // ✅ Estado: elegir producto de lista (cuando hay varios “aloe”)
+  if (session.state === "CHOOSE_PRODUCT" && Array.isArray(session.productCandidates)) {
+    const digit = extractQuantity(userText); // aquí lo usamos como número simple
+    if (digit && digit >= 1 && digit <= session.productCandidates.length) {
+      const chosen = session.productCandidates[digit - 1];
+      session.product = chosen;
+      session.state = "Q&A";
+      session.productCandidates = null;
+
+      await sendWhatsAppText(
+        userPhone,
+        `Perfecto 😊✨\nElegiste: *${chosen.name}*\n¿Te gustaría pedirlo o tienes alguna pregunta? 🛒💗`
+      );
+
+      if (chosen.image) {
+        await sendWhatsAppImage(userPhone, chosen.image, chosen.name);
+      }
+
+      return session;
+    }
+
+    // si no eligió bien
+    await sendWhatsAppText(
+      userPhone,
+      `Solo dime el número del producto por favor 😊✨\n(Ej: 1, 2, 3)`
+    );
+    return session;
+  }
+
+  // Buscar producto 1
+  let currentProduct = session.product || null;
+  const found = findProductForMessage(userText);
+  if (found) {
+    currentProduct = found.data;
+    session.product = currentProduct;
+  }
+
+  // ✅ Si solo escriben “aloe” o palabra corta -> lista completa
+  const shortWords = lowText.split(" ").filter(Boolean);
+  if (shortWords.length <= 2) {
+    const multi = findProductsByKeyword(userText);
+
+    if (multi.length >= 2) {
+      // guardamos candidatos
+      session.productCandidates = multi.slice(0, 8);
+      session.state = "CHOOSE_PRODUCT";
+
+      let msg = `Tengo estas opciones disponibles con *${shortWords[0]}* 😊✨\n\n`;
+      session.productCandidates.forEach((p, idx) => {
+        msg += `${idx + 1}) ${p.name} (RD$${p.price})\n`;
+      });
+      msg += `\nResponde con el número (Ej: 1) 💗`;
+
+      await sendWhatsAppText(userPhone, msg);
+      return session;
+    }
+  }
+
+  // Saludo
+  if (!currentProduct && (lowText === "hola" || lowText.includes("buenas"))) {
+    const greetingName = customerName ? ` ${customerName}` : "";
+    await sendWhatsAppText(
+      userPhone,
+      `¡Hola${greetingName}! 😊✨\nCuéntame, ¿qué producto estás buscando hoy? 💗`
+    );
+    session.state = "INIT";
+    return session;
+  }
+
+  // Si no hay producto
+  if (!currentProduct) {
+    await sendWhatsAppText(
+      userPhone,
+      `Disculpa 😔 no logré identificar el producto.\n¿Me dices el nombre o una palabra clave? (Ej: “colágeno”, “aloe”, “magnesio”) 💗`
+    );
+    session.state = "INIT";
+    return session;
+  }
+
+  // Referencia tipo “sí/ese/el de la foto”
+  const referentialNow = isReferencingPreviousProduct(userText);
+
+  // ✅ Si manda “2” directo (cantidad) y hay producto en sesión
+  const qtyFromText = extractQuantity(userText);
+  const shortMessage = lowText.split(" ").filter(Boolean).length <= 6;
+
+  if (
+    qtyFromText &&
+    qtyFromText > 0 &&
+    currentProduct &&
+    (referentialNow || shortMessage) &&
+    session.state !== "AWAIT_LOCATION"
+  ) {
+    session.order.quantity = qtyFromText;
+    session.state = "AWAIT_LOCATION";
+
+    await sendWhatsAppText(
+      userPhone,
+      `✅ Perfecto 😊🛒\nAnoté *${qtyFromText}* unidad(es) de *${currentProduct.name}*.\nAhora envíame tu ubicación 📍\n(clip 📎 > Ubicación > Enviar)`
+    );
+
+    return session;
+  }
+
+  // Intención de compra
+  const wantsToBuy =
+    referentialNow ||
+    lowText.includes("quiero") ||
+    lowText.includes("pedir") ||
+    lowText.includes("comprar") ||
+    lowText.includes("me lo llevo") ||
+    lowText.includes("ordenar");
+
+  // Si quiere comprar → pedir cantidad
+  if (wantsToBuy && session.state !== "AWAIT_LOCATION") {
+    session.state = "AWAIT_QUANTITY";
+    await sendWhatsAppText(
+      userPhone,
+      `Perfecto 😊🛒\n¿Cuántas unidades de *${currentProduct.name}* deseas?`
+    );
+    return session;
+  }
+
+  // Esperando cantidad
+  if (session.state === "AWAIT_QUANTITY") {
+    const q = extractQuantity(userText);
+
+    if (!q || q <= 0) {
+      await sendWhatsAppText(userPhone, "¿Cuántas unidades deseas? 😊\n(Ej: 1, 2, 3)");
+      return session;
+    }
+
+    session.order.quantity = q;
+    session.state = "AWAIT_LOCATION";
+
+    await sendWhatsAppText(
+      userPhone,
+      `✅ Anotado: *${q}* unidad(es) 😊🛒\nAhora envíame tu ubicación 📍\n(clip 📎 > Ubicación > Enviar)`
+    );
+
+    return session;
+  }
+
+  // Q&A con IA
+  const aiReply = await callOpenAI(session, currentProduct, userText);
+  await sendWhatsAppText(userPhone, aiReply);
+
+  session.history.push({ user: userText, assistant: aiReply });
+  if (session.history.length > 6) session.history.shift();
+
+  if (!session.sentImage && currentProduct.image) {
+    await sendWhatsAppImage(userPhone, currentProduct.image, currentProduct.name);
+    session.sentImage = true;
+  }
+
+  session.state = "Q&A";
+  return session;
+}
+
+// =============================
 // WEBHOOK MAIN
 // =============================
 app.post("/webhook", async (req, res) => {
@@ -556,11 +739,54 @@ app.post("/webhook", async (req, res) => {
     if (!session.lastMediaType) session.lastMediaType = null;
 
     // =============================
-    // MEDIA
+    // ✅ AUDIO: transcribir y procesar como texto
+    // =============================
+    if (msgType === "audio") {
+      res.sendStatus(200); // responder rápido al webhook
+
+      (async () => {
+        try {
+          const mediaId = msg.audio?.id;
+          if (!mediaId) {
+            await sendWhatsAppText(
+              userPhone,
+              "Recibido 😊✨\nNo pude leer el audio, ¿me lo escribes por favor? 💗"
+            );
+            return;
+          }
+
+          const mediaUrl = await getWhatsAppMediaUrl(mediaId);
+          const buffer = await downloadWhatsAppMediaBuffer(mediaUrl);
+          const transcription = await transcribeAudioBuffer(buffer);
+
+          if (!transcription) {
+            await sendWhatsAppText(
+              userPhone,
+              "Recibido 😊✨\nNo pude entender el audio, ¿me lo repites o me lo escribes? 💗"
+            );
+            return;
+          }
+
+          // Procesar como texto normal
+          session = await processText(userPhone, customerName, session, transcription);
+          await setSession(userPhone, session);
+        } catch (e) {
+          console.error("❌ Error procesando audio:", e);
+          await sendWhatsAppText(
+            userPhone,
+            "Recibido 😊✨\nTuve un error con el audio, ¿me lo escribes por favor? 💗"
+          );
+        }
+      })();
+
+      return;
+    }
+
+    // =============================
+    // IMAGEN / VIDEO / ETC (mantiene lo bueno)
     // =============================
     if (
       msgType === "image" ||
-      msgType === "audio" ||
       msgType === "sticker" ||
       msgType === "video" ||
       msgType === "document"
@@ -569,7 +795,7 @@ app.post("/webhook", async (req, res) => {
 
       await sendWhatsAppText(
         userPhone,
-        "Recibido 😊✨\nSi te refieres al producto que estábamos viendo, dime *sí* o la cantidad 🛒💗"
+        "Recibido 😊✨\nSi te refieres al producto que estábamos viendo, dime sí o la cantidad 🛒💗"
       );
 
       await setSession(userPhone, session);
@@ -581,131 +807,15 @@ app.post("/webhook", async (req, res) => {
     // =============================
     if (msgType === "text") {
       const userText = msg.text?.body?.trim() || "";
-      const lowText = normalizeText(userText);
 
-      // Buscar producto
-      let currentProduct = session.product || null;
-      const found = findProductForMessage(userText);
-      if (found) {
-        currentProduct = found.data;
-        session.product = currentProduct;
-      }
+      session = await processText(userPhone, customerName, session, userText);
 
-      // Saludo
-      if (!currentProduct && (lowText === "hola" || lowText.includes("buenas"))) {
-        const greetingName = customerName ? ` ${customerName}` : "";
-        await sendWhatsAppText(
-          userPhone,
-          `¡Hola${greetingName}! 😊✨\nCuéntame, ¿qué producto estás buscando hoy? 💗`
-        );
-        session.state = "INIT";
-        session.lastMediaType = null;
-        await setSession(userPhone, session);
-        return res.sendStatus(200);
-      }
-
-      // Referencia tipo “sí/ese/el de la foto”
-      const referentialNow = isReferencingPreviousProduct(userText);
-      if (!found && referentialNow && session.product) {
-        currentProduct = session.product;
-      }
-
-      // ✅ UPGRADE: cantidad aunque no diga "quiero comprar"
-      const qtyFromText = extractQuantity(userText);
-      const shortMessage = normalizeText(userText).split(" ").filter(Boolean).length <= 6;
-
-      if (
-        qtyFromText &&
-        qtyFromText > 0 &&
-        currentProduct &&
-        (referentialNow || shortMessage) &&
-        session.state !== "AWAIT_LOCATION"
-      ) {
-        session.order.quantity = qtyFromText;
-        session.state = "AWAIT_LOCATION";
-
-        await sendWhatsAppText(
-          userPhone,
-          `✅ Perfecto 😊🛒\nAnoté *${qtyFromText}* unidad(es) de *${currentProduct.name}*.\nAhora envíame tu ubicación 📍\n(clip 📎 > Ubicación > Enviar)`
-        );
-
-        await setSession(userPhone, session);
-        return res.sendStatus(200);
-      }
-
-      // Si no se identifica producto
-      if (!currentProduct) {
-        await sendWhatsAppText(
-          userPhone,
-          `Disculpa 😔 no logré identificar el producto.\n¿Me dices el nombre o una palabra clave? (Ej: “colágeno”, “aloe”, “magnesio”) 💗`
-        );
-        session.state = "INIT";
-        session.lastMediaType = null;
-        await setSession(userPhone, session);
-        return res.sendStatus(200);
-      }
-
-      // Intención de compra
-      const wantsToBuy =
-        referentialNow ||
-        lowText.includes("quiero") ||
-        lowText.includes("pedir") ||
-        lowText.includes("comprar") ||
-        lowText.includes("me lo llevo") ||
-        lowText.includes("ordenar");
-
-      // Si quiere comprar → pedir cantidad
-      if (wantsToBuy && session.state !== "AWAIT_LOCATION") {
-        session.state = "AWAIT_QUANTITY";
-        await sendWhatsAppText(
-          userPhone,
-          `Perfecto 😊🛒\n¿Cuántas unidades de *${currentProduct.name}* deseas?`
-        );
-        await setSession(userPhone, session);
-        return res.sendStatus(200);
-      }
-
-      // Esperando cantidad
-      if (session.state === "AWAIT_QUANTITY") {
-        const q = extractQuantity(userText);
-
-        if (!q || q <= 0) {
-          await sendWhatsAppText(userPhone, "¿Cuántas unidades deseas? 😊\n(Ej: 1, 2, 3)");
-          await setSession(userPhone, session);
-          return res.sendStatus(200);
-        }
-
-        session.order.quantity = q;
-        session.state = "AWAIT_LOCATION";
-
-        await sendWhatsAppText(
-          userPhone,
-          `✅ Anotado: *${q}* unidad(es) 😊🛒\nAhora envíame tu ubicación 📍\n(clip 📎 > Ubicación > Enviar)`
-        );
-
-        await setSession(userPhone, session);
-        return res.sendStatus(200);
-      }
-
-      // Q&A con IA
-      const aiReply = await callOpenAI(session, currentProduct, userText);
-      await sendWhatsAppText(userPhone, aiReply);
-
-      session.history.push({ user: userText, assistant: aiReply });
-      if (session.history.length > 6) session.history.shift();
-
-      if (!session.sentImage && currentProduct.image) {
-        await sendWhatsAppImage(userPhone, currentProduct.image, currentProduct.name);
-        session.sentImage = true;
-      }
-
-      session.state = "Q&A";
       await setSession(userPhone, session);
       return res.sendStatus(200);
     }
 
     // =============================
-    // LOCATION (✅ finaliza sin pago)
+    // LOCATION: finaliza pedido sin pago
     // =============================
     if (msgType === "location") {
       const loc = msg.location;
@@ -723,13 +833,13 @@ app.post("/webhook", async (req, res) => {
         const productName = session.product?.name || "Producto";
         const qty = order.quantity || 1;
 
-        // ✅ MENSAJE FINAL AL CLIENTE
+        // ✅ MENSAJE FINAL AL CLIENTE (como tú lo pediste)
         await sendWhatsAppText(
           userPhone,
           "Perfecto 🤩 unos de nuestros representantes te estará contactando con los detalles de envíos y pagos."
         );
 
-        // ✅ MENSAJE AL ADMIN
+        // ✅ MENSAJE AL ADMIN (otro WhatsApp)
         if (ADMIN_PHONE) {
           let locationInfo = "";
           if (order.location?.latitude && order.location?.longitude) {
@@ -756,18 +866,16 @@ ${locationInfo}
         session.product = null;
         session.sentImage = false;
         session.lastMediaType = null;
+        session.productCandidates = null;
 
         await setSession(userPhone, session);
         return res.sendStatus(200);
       }
 
-      await sendWhatsAppText(userPhone, "Recibí tu ubicación 😊📍\n¿Te ayudo a pedir algún producto? 💗");
-      await setSession(userPhone, session);
-      return res.sendStatus(200);
-    }
-
-    // Interactive (lo dejamos por si llega alguno)
-    if (msgType === "interactive") {
+      await sendWhatsAppText(
+        userPhone,
+        "Recibí tu ubicación 😊📍\n¿Te ayudo a pedir algún producto? 💗"
+      );
       await setSession(userPhone, session);
       return res.sendStatus(200);
     }
