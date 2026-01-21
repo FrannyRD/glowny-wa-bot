@@ -155,7 +155,6 @@ function findProducts(query) {
 
       if (p.normName.includes(q)) score += 10;
 
-      // hits por palabras
       const hits = qWords.filter((w) => p.wordSet.has(w)).length;
       score += hits;
 
@@ -201,9 +200,11 @@ function isConfirmYes(text) {
   );
 }
 
-function isOrderIntent(text) {
+// ✅ NUEVO: intención de compra aunque no diga "PEDIR"
+function isPurchaseIntent(text) {
   const q = normalizeText(text);
   return (
+    q === "pedir" ||
     q.includes("quiero pedir") ||
     q.includes("hacer el pedido") ||
     q.includes("realizar el pedido") ||
@@ -211,9 +212,21 @@ function isOrderIntent(text) {
     q.includes("confirmo el pedido") ||
     q.includes("ordenar") ||
     q.includes("reservar") ||
-    q === "pedir" ||
-    q.includes("pedir")
+    q.includes("lo quiero") ||
+    q.includes("quiero ese") ||
+    q.includes("quiero esa") ||
+    q.includes("me lo llevo") ||
+    q.includes("me la llevo") ||
+    q.includes("lo deseo") ||
+    q.includes("quiero comprar") ||
+    q.includes("comprarlo") ||
+    q.includes("comprarla")
   );
+}
+
+function isOrderIntent(text) {
+  // Mantengo tu función pero ahora incluye purchase intent
+  return isPurchaseIntent(text);
 }
 
 function extractQty(text) {
@@ -268,7 +281,12 @@ function isProductInfoQuestion(text) {
     q.includes("tamano") ||
     q.includes("ml") ||
     q.includes("gramos") ||
-    q.includes("g ")
+    q.includes("g ") ||
+    // ✅ NUEVO
+    q.includes("cuanto trae") ||
+    q.includes("cuánto trae") ||
+    q.includes("presentacion") ||
+    q.includes("presentación")
   );
 }
 
@@ -288,13 +306,22 @@ function answerFromCatalog(prod, userText) {
   if (!prod) return null;
   const q = normalizeText(userText);
 
-  // Tamaño (g/ml) si viene en nombre o campo
-  if (q.includes("tamano") || q.includes("tamaño") || q.includes("ml") || q.includes("gramos") || q.includes("g ")) {
+  // ✅ Tamaño / presentación / cuánto trae
+  if (
+    q.includes("tamano") ||
+    q.includes("tamaño") ||
+    q.includes("ml") ||
+    q.includes("gramos") ||
+    q.includes("g ") ||
+    q.includes("cuanto trae") ||
+    q.includes("cuánto trae") ||
+    q.includes("presentacion") ||
+    q.includes("presentación")
+  ) {
     const size = pickProductField(prod, ["size", "presentation", "weight"]);
     if (size) {
       return `📦 Presentación: ${size}\n🛒 Si deseas pedirlo, responde: PEDIR`;
     }
-    // extraer de name
     const nm = prod.name || "";
     const m = nm.match(/(\d+)\s?(g|ml)/i);
     if (m) {
@@ -303,7 +330,7 @@ function answerFromCatalog(prod, userText) {
     return null;
   }
 
-  // COMO SE USA
+  // ✅ COMO SE USA
   if (q.includes("como se usa") || q.includes("cómo se usa") || q.includes("como usar") || q.includes("como aplicar")) {
     const how = pickProductField(prod, ["how_to_use", "usage", "recommended_use"]);
     if (how) {
@@ -312,31 +339,16 @@ function answerFromCatalog(prod, userText) {
     return null;
   }
 
-  // CUANTO DURA / RINDE
+  // ✅ CUANTO DURA / RINDE
   if (q.includes("cuanto dura") || q.includes("cuánto dura") || q.includes("cuanto rinde") || q.includes("cuánto rinde")) {
     const dur = pickProductField(prod, ["duration_text"]);
     if (dur) {
       return `⏳ Duración aproximada:\n${dur}\n\n🛒 Si deseas pedirlo, responde: PEDIR`;
     }
-
-    if (prod.servings && Number(prod.servings) > 0) {
-      const servings = Number(prod.servings);
-      return `⏳ Rinde aprox. ${servings} porciones.\n📌 Si usas 1 por día, dura aprox. ${Math.round(servings / 7)} semanas.\n\n🛒 Si deseas pedirlo, responde: PEDIR`;
-    }
-
     return null;
   }
 
-  // SCOOP / PORCIONES / DOSIS
-  if (q.includes("scoop") || q.includes("porciones") || q.includes("dosis") || q.includes("cada cuanto") || q.includes("cada cuánto")) {
-    const scoop = pickProductField(prod, ["scoop_text"]);
-    if (scoop) {
-      return `🥄 Porciones / dosis:\n${scoop}\n\n🛒 Si deseas pedirlo, responde: PEDIR`;
-    }
-    return null;
-  }
-
-  // INGREDIENTES
+  // ✅ INGREDIENTES
   if (q.includes("ingredientes")) {
     const ing = pickProductField(prod, ["ingredients"]);
     if (ing) {
@@ -345,11 +357,20 @@ function answerFromCatalog(prod, userText) {
     return null;
   }
 
-  // QUE ES / PARA QUE SIRVE
+  // ✅ QUE ES / PARA QUE SIRVE
   if (q.includes("que es") || q.includes("qué es") || q.includes("para que sirve") || q.includes("para qué sirve") || q.includes("beneficios")) {
     const desc = pickProductField(prod, ["description", "benefits"]);
     if (desc) {
       return `✨ Sobre el producto:\n${desc}\n\n🛒 Si deseas pedirlo, responde: PEDIR`;
+    }
+    return null;
+  }
+
+  // ✅ PRECAUCIONES
+  if (q.includes("precaucion") || q.includes("precauciones") || q.includes("embarazada") || q.includes("alergia")) {
+    const warn = pickProductField(prod, ["warnings"]);
+    if (warn) {
+      return `⚠️ Precauciones:\n${warn}\n\n🛒 Si deseas pedirlo, responde: PEDIR`;
     }
     return null;
   }
@@ -361,7 +382,6 @@ function answerFromCatalog(prod, userText) {
 // META ADS / REFERRAL DETECTION
 // =============================
 function extractAdTextFromMessage(message) {
-  // WhatsApp Cloud suele enviar referral cuando viene de anuncio
   const ref = message?.referral || message?.context?.referral;
   if (!ref) return "";
 
@@ -383,7 +403,7 @@ Eres una asistente de ventas por WhatsApp de "Glowny Essentials" en República D
 ESTILO:
 - Responde claro, femenino suave, corto (2 a 6 líneas).
 - NO uses “mi amor”.
-- Emojis suaves: ✨😊💗🛒📍💳⏳🥄
+- Emojis suaves: ✨😊💗🛒📍💳⏳🥄⚠️
 
 REGLAS OBLIGATORIAS:
 - Nunca inventes información del producto.
@@ -411,12 +431,12 @@ async function callOpenAI({ history, userText, prod }) {
         name: prod.name,
         price: prod.price,
         category: prod.category || "",
-        description: prod.description || prod.benefits || "",
-        how_to_use: prod.how_to_use || prod.usage || prod.recommended_use || "",
+        description: prod.description || "",
+        how_to_use: prod.how_to_use || "",
         duration_text: prod.duration_text || "",
-        servings: prod.servings || "",
-        scoop_text: prod.scoop_text || "",
+        warnings: prod.warnings || "",
         ingredients: prod.ingredients || "",
+        type: prod.type || "",
       }
     : null;
 
@@ -565,7 +585,7 @@ async function saveMemory(wa, history) {
 // MAIN WEBHOOK
 // =============================
 app.post("/webhook", async (req, res) => {
-  const safeEnd = async (from, lockKey) => {
+  const safeEnd = async (lockKey) => {
     try {
       if (lockKey) await redisDel(lockKey);
     } catch {}
@@ -595,7 +615,7 @@ app.post("/webhook", async (req, res) => {
         from,
         "✨ Estamos actualizando el catálogo en este momento 😊\nIntenta de nuevo en 1 minutito 🙏"
       );
-      return safeEnd(from, lockKey);
+      return safeEnd(lockKey);
     }
 
     const st = await getState(from);
@@ -616,7 +636,7 @@ app.post("/webhook", async (req, res) => {
           from,
           `✨ ¡Gracias por escribirnos! 😊\nVeo que te interesa:\n${prodFromAd.name}\nPrecio: ${money(prodFromAd.price)}\n🛒 Si deseas pedirlo, responde: PEDIR`
         );
-        return safeEnd(from, lockKey);
+        return safeEnd(lockKey);
       }
     }
 
@@ -637,23 +657,33 @@ app.post("/webhook", async (req, res) => {
       await setState(from, st);
 
       await sendWhatsAppMessage(from, "📍 Perfecto ✅ Ahora dime una referencia breve (Ej: “cerca del colmado”).");
-      return safeEnd(from, lockKey);
+      return safeEnd(lockKey);
     } else {
       userText = message.text?.body || "";
     }
 
     const normText = normalizeText(userText);
 
+    // ✅ ARREGLO CLAVE:
+    // si el bot está esperando UBICACIÓN y el cliente escribe texto -> NO mandar “escríbeme el nombre”
+    if (st.step === "ASK_LOCATION" && message.type !== "location") {
+      await sendWhatsAppMessage(
+        from,
+        "📍 Perfecto 😊\nAhora envíame tu ubicación para completar el pedido.\n📎 Clip > Ubicación > Enviar ubicación actual ✅"
+      );
+      return safeEnd(lockKey);
+    }
+
     // =============================
     // 2) Saludo
     // =============================
     if (isGreeting(userText) && st.step === "IDLE" && !st.productId) {
       await sendWhatsAppMessage(from, "¡Hola! 😊✨\n¿Qué producto estás buscando hoy? Escríbeme el nombre 💗");
-      return safeEnd(from, lockKey);
+      return safeEnd(lockKey);
     }
 
     // =============================
-    // 3) Detectar producto por texto (antes de AI)
+    // 3) Detectar producto por texto
     // =============================
     const matches = findProducts(userText);
 
@@ -661,16 +691,15 @@ app.post("/webhook", async (req, res) => {
       const prod = matches[0];
       st.productId = prod.id;
       await redisSet(K.lastprod(from), prod.id);
+      await setState(from, st);
 
-      // si el user quiere pedir o confirmar
-      if (isOrderIntent(userText) || normText.includes("quiero") || normText.includes("necesito")) {
+      // Si el user quiere comprar de una vez
+      if (isPurchaseIntent(userText)) {
         st.step = "ASK_QTY";
         await setState(from, st);
-        await sendWhatsAppMessage(from, `💗 Tenemos ese 😊\n${prod.name}\nPrecio: ${money(prod.price)} c/u\n¿Cuántos deseas? 🛒`);
-        return safeEnd(from, lockKey);
+        await sendWhatsAppMessage(from, `🛒 Perfecto 😊\n${prod.name}\nPrecio: ${money(prod.price)} c/u\n¿Cuántos deseas?`);
+        return safeEnd(lockKey);
       }
-
-      await setState(from, st);
 
       if (isAskingForImage(userText) && prod.image) {
         await sendWhatsAppImage(
@@ -678,45 +707,35 @@ app.post("/webhook", async (req, res) => {
           prod.image,
           `${prod.name}\nPrecio: ${money(prod.price)}\n🛒 Si deseas pedirlo, responde: PEDIR`
         );
-        return safeEnd(from, lockKey);
+        return safeEnd(lockKey);
       }
 
       await sendWhatsAppMessage(from, `💗 ${prod.name}\nPrecio: ${money(prod.price)}\n🛒 Si deseas pedirlo, responde: PEDIR`);
-      return safeEnd(from, lockKey);
+      return safeEnd(lockKey);
     }
 
     // =============================
-    // 4) Si dice PEDIR/confirmar pero no hay producto -> usar lastprod
+    // 4) Si el cliente dice PEDIR / Lo quiero y ya hay producto
     // =============================
-    if (isOrderIntent(userText) && !st.productId) {
-      const last = await redisGet(K.lastprod(from));
-      if (last) {
-        st.productId = last;
-        st.step = "ASK_QTY";
-        await setState(from, st);
-
-        const prod = getProductById(last);
-        if (prod) {
-          await sendWhatsAppMessage(from, `🛒 Perfecto 😊\n${prod.name}\nPrecio: ${money(prod.price)} c/u\n¿Cuántos deseas?`);
-          return safeEnd(from, lockKey);
-        }
-      }
+    if (st.productId && isPurchaseIntent(userText) && st.step === "IDLE") {
+      st.step = "ASK_QTY";
+      await setState(from, st);
+      await sendWhatsAppMessage(from, "🛒 Perfecto 😊 ¿Cuántos deseas?");
+      return safeEnd(lockKey);
     }
 
     // =============================
-    // 5) Preguntas “raras” (cómo se usa / cuánto dura / etc) CON producto seleccionado
+    // 5) Preguntas de info con producto seleccionado
     // =============================
     if (st.productId && isProductInfoQuestion(userText)) {
       const prod = getProductById(st.productId);
 
-      // 1) intenta catálogo
       const direct = answerFromCatalog(prod, userText);
       if (direct) {
         await sendWhatsAppMessage(from, direct);
-        return safeEnd(from, lockKey);
+        return safeEnd(lockKey);
       }
 
-      // 2) IA sin inventar (si no hay data exacta)
       const history = await getMemory(from);
       const ai = await callOpenAI({ history, userText, prod });
 
@@ -728,48 +747,18 @@ app.post("/webhook", async (req, res) => {
       await saveMemory(from, newHistory);
 
       await sendWhatsAppMessage(from, ai);
-      return safeEnd(from, lockKey);
+      return safeEnd(lockKey);
     }
 
     // =============================
-    // 6) Si el cliente pregunta "¿qué otras tienes?" con producto seleccionado
-    // =============================
-    if (st.productId && (normText.includes("que otras") || normText.includes("cuales otras") || normText.includes("más opciones") || normText.includes("mas opciones"))) {
-      const prod = getProductById(st.productId);
-      const sims = listSimilarProducts(prod, 4);
-
-      if (sims.length) {
-        const list = sims.map((p) => `• ${p.name} — ${money(p.price)}`).join("\n");
-        await sendWhatsAppMessage(
-          from,
-          `✨ Otras opciones similares:\n${list}\n\nEscríbeme el nombre del que te gusta 💗`
-        );
-        return safeEnd(from, lockKey);
-      }
-
-      await sendWhatsAppMessage(from, "✨ Escríbeme el nombre del producto que buscas y te digo precio 💗");
-      return safeEnd(from, lockKey);
-    }
-
-    // =============================
-    // 7) Confirmación "sí" cuando ya hay producto
-    // =============================
-    if (isConfirmYes(userText) && st.productId && st.step === "IDLE") {
-      st.step = "ASK_QTY";
-      await setState(from, st);
-      await sendWhatsAppMessage(from, "🛒 Perfecto 😊 ¿Cuántos deseas?");
-      return safeEnd(from, lockKey);
-    }
-
-    // =============================
-    // 8) Flujo por estado
+    // 6) Flujo ASK_QTY
     // =============================
     if (st.step === "ASK_QTY") {
       const qty = extractQty(userText) || (isConfirmYes(userText) ? 1 : null);
 
       if (!qty) {
         await sendWhatsAppMessage(from, "¿Cuántos deseas? 😊 (Ej: 1, 2, 3)");
-        return safeEnd(from, lockKey);
+        return safeEnd(lockKey);
       }
 
       st.qty = qty;
@@ -780,15 +769,18 @@ app.post("/webhook", async (req, res) => {
         from,
         "✅ Listo\nAhora envíame tu ubicación 📍\n📎 (clip) > Ubicación > Enviar ubicación actual"
       );
-      return safeEnd(from, lockKey);
+      return safeEnd(lockKey);
     }
 
+    // =============================
+    // 7) Referencia
+    // =============================
     if (st.step === "ASK_REFERENCE") {
       const ref = userText.trim();
 
       if (!ref || normalizeText(ref) === "ubicacion enviada") {
         await sendWhatsAppMessage(from, "Dime una referencia breve 😊 (Ej: cerca del colmado)");
-        return safeEnd(from, lockKey);
+        return safeEnd(lockKey);
       }
 
       st.reference = ref;
@@ -796,15 +788,18 @@ app.post("/webhook", async (req, res) => {
       await setState(from, st);
 
       await sendWhatsAppMessage(from, "💳 ¿El pago será contra entrega o transferencia? 😊");
-      return safeEnd(from, lockKey);
+      return safeEnd(lockKey);
     }
 
+    // =============================
+    // 8) Pago
+    // =============================
     if (st.step === "ASK_PAYMENT") {
       const pay = extractPayment(userText);
 
       if (!pay) {
         await sendWhatsAppMessage(from, "💳 ¿Contra entrega o transferencia? 😊");
-        return safeEnd(from, lockKey);
+        return safeEnd(lockKey);
       }
 
       st.payment = pay;
@@ -818,16 +813,18 @@ app.post("/webhook", async (req, res) => {
         from,
         `✅ Perfecto\n🛒 Tu pedido:\n• ${st.qty}x ${prod.name}\n💰 Total: ${money(total)}\n¿Confirmas para procesarlo? 😊`
       );
-      return safeEnd(from, lockKey);
+      return safeEnd(lockKey);
     }
 
+    // =============================
+    // 9) Confirmar
+    // =============================
     if (st.step === "CONFIRM" && isConfirmYes(userText)) {
       const prod = getProductById(st.productId);
       const total = prod.price * st.qty;
 
       await sendWhatsAppMessage(from, "✅ Pedido confirmado 💗\nEn breve te lo coordinamos 😊");
 
-      // admin
       let adminText = `📦 NUEVO PEDIDO CONFIRMADO - Glowny Essentials\n\n`;
       adminText += `🛒 ${st.qty}x ${prod.name} — ${money(prod.price)}\n`;
       adminText += `💰 Total: ${money(total)}\n`;
@@ -841,61 +838,24 @@ app.post("/webhook", async (req, res) => {
 
       await sendWhatsAppMessage(ADMIN_PHONE, adminText);
 
-      // reset
       await redisDel(K.state(from));
-      return safeEnd(from, lockKey);
+      return safeEnd(lockKey);
     }
 
     // =============================
-    // 9) Si pregunta foto y hay producto seleccionado
-    // =============================
-    if (isAskingForImage(userText) && st.productId) {
-      const prod = getProductById(st.productId);
-      if (prod?.image) {
-        await sendWhatsAppImage(
-          from,
-          prod.image,
-          `${prod.name}\nPrecio: ${money(prod.price)}\n🛒 Si deseas pedirlo, responde: PEDIR`
-        );
-        return safeEnd(from, lockKey);
-      }
-    }
-
-    // =============================
-    // 10) Si el texto coincide con varios productos
+    // 10) Si hay varias coincidencias
     // =============================
     if (matches.length > 1) {
       const list = matches.map((p) => `• ${p.name} — ${money(p.price)}`).join("\n");
       await sendWhatsAppMessage(from, `✨ Encontré estas opciones:\n${list}\n\nEscríbeme el nombre exacto del que deseas 💗`);
-      return safeEnd(from, lockKey);
+      return safeEnd(lockKey);
     }
 
     // =============================
-    // 11) OpenAI para preguntas fuera del flujo (pero SIN inventar)
-    // =============================
-    const useAIOutside = st.step === "IDLE" && !matches.length && normText.length > 2 && !isOrderIntent(userText);
-    if (useAIOutside) {
-      const history = await getMemory(from);
-
-      const prod = st.productId ? getProductById(st.productId) : null;
-      const ai = await callOpenAI({ history, userText, prod });
-
-      const newHistory = [
-        ...history,
-        { role: "user", content: userText },
-        { role: "assistant", content: ai },
-      ];
-      await saveMemory(from, newHistory);
-
-      await sendWhatsAppMessage(from, ai);
-      return safeEnd(from, lockKey);
-    }
-
-    // =============================
-    // 12) Respuesta por defecto
+    // 11) Respuesta por defecto
     // =============================
     await sendWhatsAppMessage(from, "✨ Escríbeme el nombre del producto y te digo precio 😊💗");
-    return safeEnd(from, lockKey);
+    return safeEnd(lockKey);
   } catch (err) {
     console.error("❌ Error webhook:", err);
     return res.sendStatus(200);
