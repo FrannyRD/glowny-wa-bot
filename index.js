@@ -69,6 +69,55 @@ const SPANISH_STOPWORDS = new Set([
 
 const BRAND_WORDS = new Set(["deliplus", "nivea", "sisbela", "florena"]);
 
+// ✅ palabras genéricas que NO deben ser keyword
+const GENERIC_QUERY_WORDS = new Set([
+  "dime",
+  "dame",
+  "quiero",
+  "necesito",
+  "busco",
+  "tienes",
+  "tengan",
+  "tenga",
+  "tengo",
+  "tenemos",
+  "todos",
+  "todas",
+  "lista",
+  "listas",
+  "producto",
+  "productos",
+  "cual",
+  "cuales",
+  "cuál",
+  "cuáles",
+  "hay",
+  "disponible",
+  "disponibles",
+  "opciones",
+  "opcion",
+  "opción",
+  "muestrame",
+  "muéstrame",
+  "ensename",
+  "enséñame",
+  "ver",
+  "mostrar",
+  "mandame",
+  "mándame",
+  "favor",
+  "porfavor",
+  "por",
+  "fa",
+  "uno",
+  "una",
+  "el",
+  "la",
+  "los",
+  "las",
+  "de",
+]);
+
 // Index del catálogo
 const productIndex = catalog.map((prod) => {
   const nameNorm = normalizeText(prod.name);
@@ -169,11 +218,15 @@ function isListIntent(textNorm) {
     t.includes("disponible") ||
     t.includes("disponibles") ||
     t.includes("opciones") ||
-    t.includes("variedad")
+    t.includes("variedad") ||
+    t.includes("dime todos") ||
+    t.includes("dime todas") ||
+    t.includes("todos los") ||
+    t.includes("todas las")
   );
 }
 
-// ✅ intención de cambiar producto / salir del modo lista o del flujo de compra
+// ✅ intención de cambiar producto / salir
 function isChangeProductIntent(textNorm) {
   const t = (textNorm || "").trim();
 
@@ -210,13 +263,17 @@ function isChangeProductIntent(textNorm) {
   );
 }
 
-// Encontrar keyword principal
+// ✅ extraer keyword real
 function extractMainKeyword(userText) {
   const norm = normalizeText(userText);
   const words = norm.split(" ").filter(Boolean);
 
   const cleaned = words.filter(
-    (w) => !SPANISH_STOPWORDS.has(w) && !BRAND_WORDS.has(w) && w.length >= 3
+    (w) =>
+      w.length >= 3 &&
+      !SPANISH_STOPWORDS.has(w) &&
+      !BRAND_WORDS.has(w) &&
+      !GENERIC_QUERY_WORDS.has(w)
   );
 
   return cleaned[cleaned.length - 1] || "";
@@ -265,7 +322,7 @@ async function setSession(userId, sessionData) {
 }
 
 // =============================
-// WHATSAPP CLOUD API (FIX)
+// WHATSAPP CLOUD API
 // =============================
 async function waSend(payload) {
   if (!WA_TOKEN || !PHONE_NUMBER_ID) {
@@ -363,11 +420,14 @@ async function transcribeAudioBuffer(buffer, mimeType = "audio/ogg") {
     form.append("language", "es");
     form.append("file", file);
 
-    const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-      body: form,
-    });
+    const response = await fetch(
+      "https://api.openai.com/v1/audio/transcriptions",
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+        body: form,
+      }
+    );
 
     const data = await response.json();
     return (data?.text || "").trim();
@@ -512,9 +572,7 @@ app.post("/webhook", async (req, res) => {
     async function handleUserText(userText) {
       const lowText = normalizeText(userText);
 
-      // ✅✅✅ FIX PRINCIPAL:
-      // Si la persona dice "quiero otro producto" (o "otro/cambiar") NO se toma como compra.
-      // Se resetea el flujo de pedido y se pide el nuevo producto.
+      // Salir / cambiar producto
       if (
         isChangeProductIntent(lowText) &&
         session.state !== "AWAIT_LOCATION" &&
@@ -528,57 +586,58 @@ app.post("/webhook", async (req, res) => {
 
         await sendWhatsAppText(
           userPhone,
-          "Perfecto 😊💗\nDime qué producto estás buscando ahora (Ej: “aloe”, “colágeno”, “magnesio”). ✨"
+          "Perfecto 😊💗\nDime qué producto estás buscando ahora (Ej: “aloe”, “repara”, “exfoliante”, “colágeno”). ✨"
         );
         await setSession(userPhone, session);
         return;
       }
 
-      // Si está esperando elegir de la lista
-      if (session.state === "AWAIT_PRODUCT_PICK" && Array.isArray(session.listResults)) {
-        const digitMatch = userText.match(/\d+/);
-        const pick = digitMatch ? parseInt(digitMatch[0], 10) : null;
+      // ✅✅✅ AUTO KEYWORD: si escriben 1-3 palabras
+      const keywordAuto = extractMainKeyword(userText);
+      const isShortMsg =
+        normalizeText(userText).split(" ").filter(Boolean).length <= 3;
 
-        if (pick && pick >= 1 && pick <= session.listResults.length) {
-          const chosen = session.listResults[pick - 1];
-          if (chosen) {
-            session.product = chosen;
-            session.state = "Q&A";
-            session.listResults = [];
+      if (keywordAuto && isShortMsg) {
+        const autoMatches = findProductsByKeyword(keywordAuto, 12);
 
-            await sendWhatsAppText(
-              userPhone,
-              `Perfecto 😊✨\nElegiste: *${chosen.name}* 🛒💗\n¿Deseas pedirlo o tienes alguna pregunta?`
-            );
+        // ✅ UPGRADE: si solo hay 1 match, abrirlo directo (NO lista)
+        if (autoMatches.length === 1) {
+          const chosen = autoMatches[0];
+          session.product = chosen;
+          session.state = "Q&A";
+          session.listResults = [];
+          session.sentImage = false;
 
-            if (!session.sentImage && chosen.image) {
-              await sendWhatsAppImage(userPhone, chosen.image, chosen.name);
-              session.sentImage = true;
-            }
+          await sendWhatsAppText(
+            userPhone,
+            `Perfecto 😊✨\nHablemos de *${chosen.name}* 💗\n¿Deseas pedirlo o tienes alguna pregunta? 🛒`
+          );
 
-            await setSession(userPhone, session);
-            return;
+          if (!session.sentImage && chosen.image) {
+            await sendWhatsAppImage(userPhone, chosen.image, chosen.name);
+            session.sentImage = true;
           }
+
+          await setSession(userPhone, session);
+          return;
         }
 
-        const newKeyword = extractMainKeyword(userText);
-        const newMatches = findProductsByKeyword(newKeyword, 12);
-
-        if (newKeyword && newMatches.length > 0) {
-          let listText = `✨ Estos son los productos que tengo con *${newKeyword}*:\n\n`;
-          newMatches.forEach((p, i) => {
+        // Si hay 2+ entonces listar
+        if (autoMatches.length >= 2) {
+          let listText = `✨ Estos son los productos que tengo con *${keywordAuto}*:\n\n`;
+          autoMatches.forEach((p, i) => {
             listText += `${i + 1}) *${p.name}* — RD$${p.price}\n`;
           });
           listText += `\n💗 Dime el número o el nombre del que te interesa 😊`;
 
-          session.listResults = newMatches;
+          session.listResults = autoMatches;
           session.state = "AWAIT_PRODUCT_PICK";
           session.product = null;
           session.sentImage = false;
 
           await sendWhatsAppText(userPhone, listText);
 
-          const btnCount = Math.min(3, newMatches.length);
+          const btnCount = Math.min(3, autoMatches.length);
           const buttons = [];
           for (let i = 1; i <= btnCount; i++) {
             buttons.push({ id: `pick_${i}`, title: `${i}` });
@@ -588,16 +647,9 @@ app.post("/webhook", async (req, res) => {
           await setSession(userPhone, session);
           return;
         }
-
-        await sendWhatsAppText(
-          userPhone,
-          `Dime el número o el nombre del producto 😊\n(Ej: 1, 2, 3 o “loción aloe”) 💗`
-        );
-        await setSession(userPhone, session);
-        return;
       }
 
-      // Detectar intención de lista
+      // Si la persona pide lista
       if (isListIntent(lowText)) {
         const keyword = extractMainKeyword(userText);
         const matches = findProductsByKeyword(keyword, 12);
@@ -605,9 +657,31 @@ app.post("/webhook", async (req, res) => {
         if (!keyword || matches.length === 0) {
           await sendWhatsAppText(
             userPhone,
-            `Claro 😊💗\n¿De cuál producto o palabra quieres la lista?\n(Ej: “aloe”, “colágeno”, “magnesio”, “crema”)`
+            `Claro 😊💗\n¿De cuál palabra quieres la lista?\n(Ej: “aloe”, “repara”, “exfoliante”, “colágeno”, “crema”)`
           );
           session.state = "INIT";
+          await setSession(userPhone, session);
+          return;
+        }
+
+        // ✅ UPGRADE: si lista tiene 1 solo producto, abrirlo directo
+        if (matches.length === 1) {
+          const chosen = matches[0];
+          session.product = chosen;
+          session.state = "Q&A";
+          session.listResults = [];
+          session.sentImage = false;
+
+          await sendWhatsAppText(
+            userPhone,
+            `Perfecto 😊✨\nSolo tengo este con *${keyword}*:\n*${chosen.name}* 💗\n¿Deseas pedirlo o tienes alguna pregunta? 🛒`
+          );
+
+          if (!session.sentImage && chosen.image) {
+            await sendWhatsAppImage(userPhone, chosen.image, chosen.name);
+            session.sentImage = true;
+          }
+
           await setSession(userPhone, session);
           return;
         }
@@ -638,25 +712,28 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // ✅ FIX EXTRA: Si estaba esperando cantidad y el usuario escribe un producto (ej: "colágeno"),
-      // cambiamos al producto y NO insistimos con "¿cuántas unidades?"
-      if (session.state === "AWAIT_QUANTITY") {
+      // Elegir de lista
+      if (
+        session.state === "AWAIT_PRODUCT_PICK" &&
+        Array.isArray(session.listResults)
+      ) {
         const digitMatch = userText.match(/\d+/);
-        if (!digitMatch) {
-          const maybeNew = findProductForMessage(userText);
-          if (maybeNew?.data) {
-            session.product = maybeNew.data;
+        const pick = digitMatch ? parseInt(digitMatch[0], 10) : null;
+
+        if (pick && pick >= 1 && pick <= session.listResults.length) {
+          const chosen = session.listResults[pick - 1];
+          if (chosen) {
+            session.product = chosen;
             session.state = "Q&A";
-            session.order = {};
-            session.sentImage = false;
+            session.listResults = [];
 
             await sendWhatsAppText(
               userPhone,
-              `Entendido 😊✨\nHablemos de *${session.product.name}* 💗\n¿Quieres que te ayude a pedirlo o tienes una pregunta? 🛒`
+              `Perfecto 😊✨\nElegiste: *${chosen.name}* 🛒💗\n¿Deseas pedirlo o tienes alguna pregunta?`
             );
 
-            if (session.product.image) {
-              await sendWhatsAppImage(userPhone, session.product.image, session.product.name);
+            if (!session.sentImage && chosen.image) {
+              await sendWhatsAppImage(userPhone, chosen.image, chosen.name);
               session.sentImage = true;
             }
 
@@ -664,9 +741,16 @@ app.post("/webhook", async (req, res) => {
             return;
           }
         }
+
+        await sendWhatsAppText(
+          userPhone,
+          `Dime el número o el nombre del producto 😊\n(Ej: 1, 2, 3 o “loción aloe”) 💗`
+        );
+        await setSession(userPhone, session);
+        return;
       }
 
-      // Detectar intención de compra (y confirmaciones)
+      // Detectar intención de compra
       const wantsToBuy =
         lowText.includes("quiero") ||
         lowText.includes("lo quiero") ||
@@ -709,7 +793,7 @@ app.post("/webhook", async (req, res) => {
       if (!currentProduct) {
         await sendWhatsAppText(
           userPhone,
-          `Disculpa 😔 no logré identificar el producto.\n¿Me dices el nombre o una palabra clave? (Ej: “colágeno”, “aloe”, “magnesio”) 💗`
+          `Disculpa 😔 no logré identificar el producto.\n¿Me dices el nombre o una palabra? (Ej: “aloe”, “repara”, “exfoliante”) 💗`
         );
         session.state = "INIT";
         await setSession(userPhone, session);
@@ -766,7 +850,11 @@ app.post("/webhook", async (req, res) => {
       if (session.history.length > 6) session.history.shift();
 
       if (!session.sentImage && currentProduct.image) {
-        await sendWhatsAppImage(userPhone, currentProduct.image, currentProduct.name);
+        await sendWhatsAppImage(
+          userPhone,
+          currentProduct.image,
+          currentProduct.name
+        );
         session.sentImage = true;
       }
 
@@ -784,7 +872,10 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (msgType === "audio") {
-      await sendWhatsAppText(userPhone, "Recibido 😊🎧 Dame un segundito y te respondo…✨");
+      await sendWhatsAppText(
+        userPhone,
+        "Recibido 😊🎧 Dame un segundito y te respondo…✨"
+      );
 
       const mediaId = msg.audio?.id;
       const transcript = await transcribeWhatsAppAudio(mediaId);
@@ -825,7 +916,10 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      await sendWhatsAppText(userPhone, "Recibí tu ubicación 😊📍\n¿Te ayudo a pedir algún producto? 💗");
+      await sendWhatsAppText(
+        userPhone,
+        "Recibí tu ubicación 😊📍\n¿Te ayudo a pedir algún producto? 💗"
+      );
       await setSession(userPhone, session);
       return res.sendStatus(200);
     }
@@ -859,7 +953,10 @@ app.post("/webhook", async (req, res) => {
             return res.sendStatus(200);
           }
 
-          await sendWhatsAppText(userPhone, "Disculpa 😊💗 no pude seleccionar esa opción. ¿Me dices el número?");
+          await sendWhatsAppText(
+            userPhone,
+            "Disculpa 😊💗 no pude seleccionar esa opción. ¿Me dices el número?"
+          );
           await setSession(userPhone, session);
           return res.sendStatus(200);
         }
