@@ -38,87 +38,58 @@ function normalizeText(text) {
   return normalized;
 }
 
-// Stopwords
+// Stopwords + palabras muy comunes
 const SPANISH_STOPWORDS = new Set([
-  "de",
-  "la",
-  "y",
-  "con",
-  "para",
-  "del",
-  "en",
-  "el",
-  "al",
-  "por",
-  "una",
-  "un",
-  "unos",
-  "unas",
-  "lo",
-  "los",
-  "las",
-  "le",
-  "les",
-  "tu",
-  "su",
-  "sus",
-  "mi",
-  "mis",
-  "que",
+  "de","la","y","con","para","del","en","el","al","por","una","un","unos","unas",
+  "lo","los","las","le","les","tu","su","sus","mi","mis","que","me","te","se",
+  "a","o","u","es","son","esto","esta","estas","estos","ese","esa","eses","esas",
+  "porfa","porfavor","favor","ahi","aqui","aquí","allá","alla","ahí"
 ]);
 
 const BRAND_WORDS = new Set(["deliplus", "nivea", "sisbela", "florena"]);
 
-// ✅ palabras genéricas que NO deben ser keyword
-const GENERIC_QUERY_WORDS = new Set([
-  "dime",
-  "dame",
-  "quiero",
-  "necesito",
-  "busco",
-  "tienes",
-  "tengan",
-  "tenga",
-  "tengo",
-  "tenemos",
-  "todos",
-  "todas",
-  "lista",
-  "listas",
-  "producto",
-  "productos",
-  "cual",
-  "cuales",
-  "cuál",
-  "cuáles",
-  "hay",
-  "disponible",
-  "disponibles",
-  "opciones",
-  "opcion",
-  "opción",
-  "muestrame",
-  "muéstrame",
-  "ensename",
-  "enséñame",
-  "ver",
-  "mostrar",
-  "mandame",
-  "mándame",
-  "favor",
-  "porfavor",
-  "por",
-  "fa",
-  "uno",
-  "una",
-  "el",
-  "la",
-  "los",
-  "las",
-  "de",
+const GENERIC_WORDS = new Set([
+  "producto","productos","lista","dime","todos","todas","cuales","cuáles",
+  "tienes","tenga","disponible","disponibles","hay","quiero","necesito",
+  "ver","muestrame","muéstrame","ensename","enséñame","recomiendame","recomiéndame",
+  "otra","otro","cambiar","cambio","buscar","busco",
+  // Evitar el bug de “cómo se usa”
+  "como","cómo","usa","usar","uso","usarlo","usarla","usarse","usas","usan"
 ]);
 
+// Confirmaciones para avanzar
+const CONFIRM_WORDS = new Set([
+  "si","sí","sii","siii","sip","sipi","ok","okay","okey","dale","va","deuna","de una",
+  "claro","perfecto","listo","bien","correcto","confirmo","acepto","haganlo","hagalo",
+  "hagámoslo","hagamelo","házmelo","hazmelo"
+]);
+
+function isConfirmation(text) {
+  const t = normalizeText(text);
+  if (!t) return false;
+  if (CONFIRM_WORDS.has(t)) return true;
+  const words = t.split(" ");
+  return words.some((w) => CONFIRM_WORDS.has(w));
+}
+
+function wantsOtherProduct(text) {
+  const t = normalizeText(text);
+  return (
+    t === "otro" ||
+    t === "otra" ||
+    t.includes("otro producto") ||
+    t.includes("otra cosa") ||
+    t.includes("quiero otro") ||
+    t.includes("cambiar producto") ||
+    t.includes("cambio de producto") ||
+    t.includes("ver otro") ||
+    t.includes("seguir viendo")
+  );
+}
+
+// =============================
 // Index del catálogo
+// =============================
 const productIndex = catalog.map((prod) => {
   const nameNorm = normalizeText(prod.name);
   const keywords = new Set(
@@ -126,15 +97,20 @@ const productIndex = catalog.map((prod) => {
       .split(" ")
       .filter((w) => w && !SPANISH_STOPWORDS.has(w) && !BRAND_WORDS.has(w))
   );
+
   return {
     id: prod.id,
     name: prod.name,
     keywords,
     data: prod,
+    nameNorm,
+    descNorm: normalizeText(prod.description || ""),
+    catNorm: normalizeText(prod.category || ""),
+    typeNorm: normalizeText(prod.type || ""),
   };
 });
 
-// Match 1 producto
+// Match “mejor producto” (1 resultado)
 function findProductForMessage(message) {
   const msgNorm = normalizeText(message);
   const msgWords = new Set(
@@ -161,122 +137,105 @@ function findProductForMessage(message) {
   return bestMatch;
 }
 
-// Buscar MUCHOS productos por palabra clave
-function findProductsByKeyword(keyword, limit = 12) {
-  const key = normalizeText(keyword);
-  if (!key) return [];
+// ✅ Match “lista de productos por palabra” (varios resultados)
+function findProductsByKeyword(keyword) {
+  const k = normalizeText(keyword);
+  if (!k) return [];
+
+  if (GENERIC_WORDS.has(k) || SPANISH_STOPWORDS.has(k)) return [];
 
   const results = [];
 
-  for (const p of catalog) {
-    const name = normalizeText(p.name || "");
-    const category = normalizeText(p.category || "");
-    const desc = normalizeText(p.description || "");
-    const type = normalizeText(p.type || "");
-    const how = normalizeText(p.how_to_use || "");
-    const ing = normalizeText(p.ingredients || "");
+  for (const item of productIndex) {
+    const inName = item.nameNorm.includes(k);
+    const inDesc = item.descNorm.includes(k);
+    const inCat = item.catNorm.includes(k);
+    const inType = item.typeNorm.includes(k);
 
-    if (
-      name.includes(key) ||
-      category.includes(key) ||
-      desc.includes(key) ||
-      type.includes(key) ||
-      how.includes(key) ||
-      ing.includes(key)
-    ) {
-      results.push(p);
+    if (inName || inDesc || inCat || inType) {
+      results.push(item.data);
     }
   }
 
-  const unique = [];
-  const seen = new Set();
-  for (const r of results) {
-    if (!seen.has(r.id)) {
-      unique.push(r);
-      seen.add(r.id);
-    }
-  }
-
-  return unique.slice(0, limit);
+  return results;
 }
 
-// Detectar intención de lista
-function isListIntent(textNorm) {
-  const t = textNorm || "";
+// Detectar intención de "lista"
+function isListIntent(text) {
+  const t = normalizeText(text);
+  if (!t) return false;
+
+  if (
+    t.includes("como se usa") ||
+    t.includes("cómo se usa") ||
+    t.includes("como usar")
+  ) {
+    return false;
+  }
+
   return (
-    t.includes("cuales") ||
-    t.includes("cuáles") ||
+    t.includes("dime todos") ||
+    t.includes("dime todas") ||
+    t.includes("cuales tienes") ||
+    t.includes("cuáles tienes") ||
+    t.includes("cuales son") ||
+    t.includes("cuáles son") ||
     t.includes("que tienes") ||
     t.includes("qué tienes") ||
-    t.includes("que hay") ||
-    t.includes("qué hay") ||
-    t.includes("tienes de") ||
-    t.includes("hay de") ||
     t.includes("lista") ||
     t.includes("muestrame") ||
     t.includes("muéstrame") ||
     t.includes("disponible") ||
-    t.includes("disponibles") ||
-    t.includes("opciones") ||
-    t.includes("variedad") ||
-    t.includes("dime todos") ||
-    t.includes("dime todas") ||
-    t.includes("todos los") ||
-    t.includes("todas las")
+    t.includes("disponibles")
   );
 }
 
-// ✅ intención de cambiar producto / salir
-function isChangeProductIntent(textNorm) {
-  const t = (textNorm || "").trim();
+// Extraer palabra clave para listar
+function extractKeywordForList(text) {
+  const t = normalizeText(text);
 
-  if (t === "no" || t === "nop" || t === "nope") return true;
+  const quoted = text.match(/"([^"]+)"/);
+  if (quoted && quoted[1]) return quoted[1];
 
-  return (
-    t.includes("otro producto") ||
-    t.includes("quiero otro producto") ||
-    t.includes("otra cosa") ||
-    t.includes("otra opcion") ||
-    t.includes("otra opción") ||
-    t.includes("otro") ||
-    t.includes("cambiar") ||
-    t.includes("diferente") ||
-    t.includes("ninguno") ||
-    t.includes("no quiero") ||
-    t.includes("no me interesa") ||
-    t.includes("no ese") ||
-    t.includes("mejor otro") ||
-    t.includes("quiero otro") ||
-    t.includes("quiero otra") ||
-    t.includes("mandame otro") ||
-    t.includes("mándame otro") ||
-    t.includes("muéstrame otro") ||
-    t.includes("muestrame otro") ||
-    t.includes("dame otro") ||
-    t.includes("dame opciones") ||
-    t.includes("más opciones") ||
-    t.includes("ver mas") ||
-    t.includes("ver más") ||
-    t.includes("volver") ||
-    t.includes("cancelar") ||
-    t.includes("salir")
-  );
-}
+  const deMatch = t.match(/\bde\s+([a-z0-9ñáéíóúü]+)/i);
+  if (deMatch && deMatch[1]) return deMatch[1];
 
-// ✅ extraer keyword real
-function extractMainKeyword(userText) {
-  const norm = normalizeText(userText);
-  const words = norm.split(" ").filter(Boolean);
+  const words = t.split(" ").filter(Boolean);
 
-  const cleaned = words.filter(
+  let candidates = words.filter(
     (w) =>
-      w.length >= 3 &&
       !SPANISH_STOPWORDS.has(w) &&
-      !BRAND_WORDS.has(w) &&
-      !GENERIC_QUERY_WORDS.has(w)
+      !GENERIC_WORDS.has(w) &&
+      w.length >= 3
   );
 
-  return cleaned[cleaned.length - 1] || "";
+  if (candidates.length === 0) return words[words.length - 1] || "";
+  candidates.sort((a, b) => b.length - a.length);
+  return candidates[0];
+}
+
+// Formato lista bonita
+function formatProductList(products, keyword) {
+  const top = products.slice(0, 10);
+  const lines = top.map((p, idx) => {
+    const price = p.price ? `RD$${p.price}` : "";
+    return `${idx + 1}) *${p.name}* ${price ? `— ${price}` : ""}`;
+  });
+
+  return `✨ Estos son los productos que tengo con *${keyword}*:\n\n${lines.join(
+    "\n"
+  )}\n\nDime el número o el nombre del producto 😊💗`;
+}
+
+// Reset para pedir otro producto
+function resetToChooseNewProduct(session) {
+  session.state = "INIT";
+  session.order = {};
+  session.product = null;
+  session.sentImage = false;
+  session.awaitingListChoice = false;
+  session.listCandidates = [];
+  return session;
 }
 
 // =============================
@@ -296,10 +255,7 @@ async function getSession(userId) {
       return JSON.parse(res.data.result);
     }
   } catch (error) {
-    console.error(
-      "❌ Error obteniendo sesión de Redis:",
-      error?.response?.data || error
-    );
+    console.error("❌ Error obteniendo sesión de Redis:", error?.response?.data || error);
   }
   return null;
 }
@@ -314,15 +270,13 @@ async function setSession(userId, sessionData) {
       { headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` } }
     );
   } catch (error) {
-    console.error(
-      "❌ Error guardando sesión en Redis:",
-      error?.response?.data || error
-    );
+    console.error("❌ Error guardando sesión en Redis:", error?.response?.data || error);
   }
 }
 
 // =============================
-// WHATSAPP CLOUD API
+// WHATSAPP CLOUD API (FIX)
+// ✅ messaging_product: "whatsapp"
 // =============================
 async function waSend(payload) {
   if (!WA_TOKEN || !PHONE_NUMBER_ID) {
@@ -370,89 +324,8 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
   });
 }
 
-async function sendWhatsAppButtons(to, text, buttons) {
-  await waSend({
-    to: onlyDigits(to),
-    type: "interactive",
-    interactive: {
-      type: "button",
-      body: { text },
-      action: {
-        buttons: buttons.map((btn) => ({
-          type: "reply",
-          reply: { id: btn.id, title: btn.title },
-        })),
-      },
-    },
-  });
-}
-
 // =============================
-// AUDIO TRANSCRIPTION
-// =============================
-async function getWhatsAppMediaUrl(mediaId) {
-  const url = `https://graph.facebook.com/v20.0/${mediaId}`;
-  const res = await axios.get(url, {
-    headers: { Authorization: `Bearer ${WA_TOKEN}` },
-  });
-
-  return {
-    url: res.data?.url,
-    mime_type: res.data?.mime_type || "audio/ogg",
-  };
-}
-
-async function downloadWhatsAppMedia(mediaUrl) {
-  const res = await axios.get(mediaUrl, {
-    responseType: "arraybuffer",
-    headers: { Authorization: `Bearer ${WA_TOKEN}` },
-  });
-  return Buffer.from(res.data);
-}
-
-async function transcribeAudioBuffer(buffer, mimeType = "audio/ogg") {
-  try {
-    const blob = new Blob([buffer], { type: mimeType });
-    const file = new File([blob], "audio.ogg", { type: mimeType });
-
-    const form = new FormData();
-    form.append("model", "gpt-4o-mini-transcribe");
-    form.append("language", "es");
-    form.append("file", file);
-
-    const response = await fetch(
-      "https://api.openai.com/v1/audio/transcriptions",
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-        body: form,
-      }
-    );
-
-    const data = await response.json();
-    return (data?.text || "").trim();
-  } catch (err) {
-    console.error("❌ Error transcribiendo audio:", err);
-    return "";
-  }
-}
-
-async function transcribeWhatsAppAudio(mediaId) {
-  if (!mediaId) return "";
-  if (!WA_TOKEN) return "";
-  if (!OPENAI_API_KEY) return "";
-
-  const media = await getWhatsAppMediaUrl(mediaId);
-  if (!media?.url) return "";
-
-  const audioBuffer = await downloadWhatsAppMedia(media.url);
-  const transcript = await transcribeAudioBuffer(audioBuffer, media.mime_type);
-
-  return transcript;
-}
-
-// =============================
-// OPENAI CHAT
+// OPENAI - CHAT
 // =============================
 async function callOpenAI(session, product, userMessage) {
   const productInfo = product
@@ -522,6 +395,286 @@ ${productInfo}`;
 }
 
 // =============================
+// ✅ OPENAI - AUDIO TRANSCRIPTION (UPGRADE)
+// =============================
+function getFileExtFromMime(mime) {
+  const m = (mime || "").toLowerCase();
+  if (m.includes("ogg")) return "ogg";
+  if (m.includes("mpeg")) return "mp3";
+  if (m.includes("mp4")) return "mp4";
+  if (m.includes("wav")) return "wav";
+  if (m.includes("webm")) return "webm";
+  return "ogg";
+}
+
+async function fetchWhatsAppMedia(mediaId) {
+  // 1) Obtener URL del media
+  const metaUrl = `https://graph.facebook.com/v20.0/${mediaId}`;
+  const metaRes = await axios.get(metaUrl, {
+    headers: { Authorization: `Bearer ${WA_TOKEN}` },
+  });
+
+  const mediaUrl = metaRes.data?.url;
+  const mimeType = metaRes.data?.mime_type || "audio/ogg";
+
+  if (!mediaUrl) throw new Error("No se pudo obtener URL del media");
+
+  // 2) Descargar el archivo binario
+  const fileRes = await axios.get(mediaUrl, {
+    responseType: "arraybuffer",
+    headers: { Authorization: `Bearer ${WA_TOKEN}` },
+  });
+
+  return { buffer: fileRes.data, mimeType };
+}
+
+async function transcribeAudioToText(buffer, mimeType) {
+  if (!OPENAI_API_KEY) throw new Error("Falta OPENAI_API_KEY");
+
+  // ✅ Node 18+ tiene fetch/FormData/Blob global
+  const ext = getFileExtFromMime(mimeType);
+  const fileName = `audio.${ext}`;
+
+  const form = new FormData();
+  form.append("model", "whisper-1");
+  form.append("language", "es");
+
+  const blob = new Blob([buffer], { type: mimeType });
+  form.append("file", blob, fileName);
+
+  const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: form,
+  });
+
+  const data = await resp.json();
+  if (!resp.ok) {
+    console.error("❌ Error transcripción:", data);
+    throw new Error("Fallo transcripción");
+  }
+
+  return (data.text || "").trim();
+}
+
+// =============================
+// ✅ TEXT PROCESSOR (reutilizable para texto y audio)
+// =============================
+async function processUserText({
+  userPhone,
+  customerName,
+  session,
+  userText,
+}) {
+  const lowText = normalizeText(userText);
+
+  // ✅ “otro producto” en cualquier punto → resetea
+  if (wantsOtherProduct(userText)) {
+    resetToChooseNewProduct(session);
+    await sendWhatsAppText(
+      userPhone,
+      `Perfecto 😊✨\n¿Cuál producto deseas ahora? (Ej: “aloe”, “colágeno”, “exfoliante”) 💗`
+    );
+    await setSession(userPhone, session);
+    return;
+  }
+
+  // ✅ Si está esperando cantidad y dicen “ok/si/dale”
+  if (session.state === "AWAIT_QUANTITY" && isConfirmation(userText)) {
+    await sendWhatsAppText(
+      userPhone,
+      `Perfecto 😊🛒\nSolo dime la cantidad por favor (Ej: 1, 2, 3).`
+    );
+    await setSession(userPhone, session);
+    return;
+  }
+
+  // ✅ Intención de lista (“dime todos los aloe / cuales aloe tienes”)
+  if (isListIntent(userText)) {
+    const keyword = extractKeywordForList(userText);
+    const list = findProductsByKeyword(keyword);
+
+    if (list.length === 0) {
+      await sendWhatsAppText(
+        userPhone,
+        `Mmm 🤔 no encontré productos con *${keyword}*.\n¿Me dices otra palabra? (Ej: “aloe”, “repara”, “magnesio”) 💗`
+      );
+      await setSession(userPhone, session);
+      return;
+    }
+
+    session.awaitingListChoice = true;
+    session.listCandidates = list;
+
+    await sendWhatsAppText(userPhone, formatProductList(list, keyword));
+    await setSession(userPhone, session);
+    return;
+  }
+
+  // ✅ Si está esperando selección de una lista y el cliente escribe número o nombre
+  if (session.awaitingListChoice && session.listCandidates?.length > 0) {
+    const digitMatch = userText.match(/\d+/);
+    let selected = null;
+
+    if (digitMatch) {
+      const idx = parseInt(digitMatch[0], 10) - 1;
+      if (idx >= 0 && idx < session.listCandidates.length) {
+        selected = session.listCandidates[idx];
+      }
+    }
+
+    if (!selected) {
+      const norm = normalizeText(userText);
+      selected = session.listCandidates.find((p) =>
+        normalizeText(p.name).includes(norm)
+      );
+    }
+
+    if (selected) {
+      session.product = selected;
+      session.awaitingListChoice = false;
+      session.listCandidates = [];
+      session.state = "Q&A";
+      session.sentImage = false;
+
+      await sendWhatsAppText(
+        userPhone,
+        `¡Perfecto! 😊✨\nHablemos de *${selected.name}* 💗\n¿Te gustaría más info o hacemos tu pedido? 🛒`
+      );
+
+      if (selected.image) {
+        await sendWhatsAppImage(userPhone, selected.image, selected.name);
+        session.sentImage = true;
+      }
+
+      await setSession(userPhone, session);
+      return;
+    } else {
+      await sendWhatsAppText(
+        userPhone,
+        `No logré identificar cuál 😔\nDime el número o el nombre del producto (Ej: 1 o “loción aloe”) 💗`
+      );
+      await setSession(userPhone, session);
+      return;
+    }
+  }
+
+  // Detectar intención de compra (más fácil)
+  const wantsToBuy =
+    lowText.includes("quiero") ||
+    lowText.includes("lo quiero") ||
+    lowText.includes("pedir") ||
+    lowText.includes("comprar") ||
+    lowText.includes("me lo llevo") ||
+    lowText.includes("ordenar") ||
+    lowText === "si" ||
+    lowText === "sí";
+
+  // Producto actual
+  let currentProduct = session.product || null;
+
+  // ✅ Si el mensaje es una sola palabra “aloe / repara” y hay varios → lista
+  if (!currentProduct) {
+    const simpleWord = lowText.split(" ").length === 1 ? lowText : "";
+    if (simpleWord && !GENERIC_WORDS.has(simpleWord)) {
+      const list = findProductsByKeyword(simpleWord);
+      if (list.length >= 2) {
+        session.awaitingListChoice = true;
+        session.listCandidates = list;
+        await sendWhatsAppText(userPhone, formatProductList(list, simpleWord));
+        await setSession(userPhone, session);
+        return;
+      }
+    }
+  }
+
+  // Buscar mejor match si no hay producto
+  const found = findProductForMessage(userText);
+  if (found) {
+    currentProduct = found.data;
+    session.product = currentProduct;
+  }
+
+  // Saludo
+  if (!currentProduct && (lowText === "hola" || lowText.includes("buenas"))) {
+    const greetingName = customerName ? ` ${customerName}` : "";
+    await sendWhatsAppText(
+      userPhone,
+      `¡Hola${greetingName}! 😊✨\nCuéntame, ¿qué producto estás buscando hoy? 💗`
+    );
+    session.state = "INIT";
+    await setSession(userPhone, session);
+    return;
+  }
+
+  // No se identifica producto
+  if (!currentProduct) {
+    await sendWhatsAppText(
+      userPhone,
+      `Disculpa 😔 no logré identificar el producto.\n¿Me dices el nombre o una palabra clave? (Ej: “aloe”, “colágeno”, “repara”) 💗`
+    );
+    session.state = "INIT";
+    await setSession(userPhone, session);
+    return;
+  }
+
+  // ✅ Compra → pedir cantidad
+  if (wantsToBuy && session.state !== "AWAIT_LOCATION") {
+    session.state = "AWAIT_QUANTITY";
+    await sendWhatsAppText(
+      userPhone,
+      `Perfecto 😊🛒\n¿Cuántas unidades de *${currentProduct.name}* deseas?`
+    );
+    await setSession(userPhone, session);
+    return;
+  }
+
+  // ✅ Esperando cantidad
+  if (session.state === "AWAIT_QUANTITY") {
+    let quantity = null;
+    const digitMatch = userText.match(/\d+/);
+
+    if (digitMatch) quantity = parseInt(digitMatch[0], 10);
+
+    if (!quantity || quantity <= 0) {
+      await sendWhatsAppText(
+        userPhone,
+        "¿Cuántas unidades deseas? 😊\n(Ej: 1, 2, 3)"
+      );
+      await setSession(userPhone, session);
+      return;
+    }
+
+    session.order.quantity = quantity;
+    session.state = "AWAIT_LOCATION";
+
+    await sendWhatsAppText(
+      userPhone,
+      `✅ Anotado: *${quantity}* unidad(es) 😊🛒\nAhora envíame tu ubicación 📍 (clip 📎 > Ubicación > Enviar).`
+    );
+    await setSession(userPhone, session);
+    return;
+  }
+
+  // ✅ Q&A con IA (uso, duración, etc)
+  const aiReply = await callOpenAI(session, currentProduct, userText);
+  await sendWhatsAppText(userPhone, aiReply);
+
+  session.history.push({ user: userText, assistant: aiReply });
+  if (session.history.length > 6) session.history.shift();
+
+  if (!session.sentImage && currentProduct.image) {
+    await sendWhatsAppImage(userPhone, currentProduct.image, currentProduct.name);
+    session.sentImage = true;
+  }
+
+  session.state = "Q&A";
+  await setSession(userPhone, session);
+}
+
+// =============================
 // WEBHOOK VERIFY
 // =============================
 app.get("/webhook", (req, res) => {
@@ -564,335 +717,62 @@ app.post("/webhook", async (req, res) => {
     if (!session.history) session.history = [];
     if (!session.order) session.order = {};
     if (!session.state) session.state = "INIT";
-    if (!session.listResults) session.listResults = [];
+    if (!session.listCandidates) session.listCandidates = [];
+    if (!session.awaitingListChoice) session.awaitingListChoice = false;
 
-    // =============================
-    // CENTRAL TEXT HANDLER
-    // =============================
-    async function handleUserText(userText) {
-      const lowText = normalizeText(userText);
-
-      // Salir / cambiar producto
-      if (
-        isChangeProductIntent(lowText) &&
-        session.state !== "AWAIT_LOCATION" &&
-        session.state !== "AWAIT_PAYMENT"
-      ) {
-        session.state = "INIT";
-        session.order = {};
-        session.product = null;
-        session.listResults = [];
-        session.sentImage = false;
-
-        await sendWhatsAppText(
-          userPhone,
-          "Perfecto 😊💗\nDime qué producto estás buscando ahora (Ej: “aloe”, “repara”, “exfoliante”, “colágeno”). ✨"
-        );
-        await setSession(userPhone, session);
-        return;
-      }
-
-      // ✅✅✅ AUTO KEYWORD: si escriben 1-3 palabras
-      const keywordAuto = extractMainKeyword(userText);
-      const isShortMsg =
-        normalizeText(userText).split(" ").filter(Boolean).length <= 3;
-
-      if (keywordAuto && isShortMsg) {
-        const autoMatches = findProductsByKeyword(keywordAuto, 12);
-
-        // ✅ UPGRADE: si solo hay 1 match, abrirlo directo (NO lista)
-        if (autoMatches.length === 1) {
-          const chosen = autoMatches[0];
-          session.product = chosen;
-          session.state = "Q&A";
-          session.listResults = [];
-          session.sentImage = false;
-
-          await sendWhatsAppText(
-            userPhone,
-            `Perfecto 😊✨\nHablemos de *${chosen.name}* 💗\n¿Deseas pedirlo o tienes alguna pregunta? 🛒`
-          );
-
-          if (!session.sentImage && chosen.image) {
-            await sendWhatsAppImage(userPhone, chosen.image, chosen.name);
-            session.sentImage = true;
-          }
-
-          await setSession(userPhone, session);
-          return;
-        }
-
-        // Si hay 2+ entonces listar
-        if (autoMatches.length >= 2) {
-          let listText = `✨ Estos son los productos que tengo con *${keywordAuto}*:\n\n`;
-          autoMatches.forEach((p, i) => {
-            listText += `${i + 1}) *${p.name}* — RD$${p.price}\n`;
-          });
-          listText += `\n💗 Dime el número o el nombre del que te interesa 😊`;
-
-          session.listResults = autoMatches;
-          session.state = "AWAIT_PRODUCT_PICK";
-          session.product = null;
-          session.sentImage = false;
-
-          await sendWhatsAppText(userPhone, listText);
-
-          const btnCount = Math.min(3, autoMatches.length);
-          const buttons = [];
-          for (let i = 1; i <= btnCount; i++) {
-            buttons.push({ id: `pick_${i}`, title: `${i}` });
-          }
-          await sendWhatsAppButtons(userPhone, "Elige una opción:", buttons);
-
-          await setSession(userPhone, session);
-          return;
-        }
-      }
-
-      // Si la persona pide lista
-      if (isListIntent(lowText)) {
-        const keyword = extractMainKeyword(userText);
-        const matches = findProductsByKeyword(keyword, 12);
-
-        if (!keyword || matches.length === 0) {
-          await sendWhatsAppText(
-            userPhone,
-            `Claro 😊💗\n¿De cuál palabra quieres la lista?\n(Ej: “aloe”, “repara”, “exfoliante”, “colágeno”, “crema”)`
-          );
-          session.state = "INIT";
-          await setSession(userPhone, session);
-          return;
-        }
-
-        // ✅ UPGRADE: si lista tiene 1 solo producto, abrirlo directo
-        if (matches.length === 1) {
-          const chosen = matches[0];
-          session.product = chosen;
-          session.state = "Q&A";
-          session.listResults = [];
-          session.sentImage = false;
-
-          await sendWhatsAppText(
-            userPhone,
-            `Perfecto 😊✨\nSolo tengo este con *${keyword}*:\n*${chosen.name}* 💗\n¿Deseas pedirlo o tienes alguna pregunta? 🛒`
-          );
-
-          if (!session.sentImage && chosen.image) {
-            await sendWhatsAppImage(userPhone, chosen.image, chosen.name);
-            session.sentImage = true;
-          }
-
-          await setSession(userPhone, session);
-          return;
-        }
-
-        let listText = `✨ Estos son los productos que tengo con *${keyword}*:\n\n`;
-        matches.forEach((p, i) => {
-          listText += `${i + 1}) *${p.name}* — RD$${p.price}\n`;
-        });
-
-        listText += `\n💗 Dime el número o el nombre del que te interesa 😊`;
-
-        session.listResults = matches;
-        session.state = "AWAIT_PRODUCT_PICK";
-        session.product = null;
-        session.sentImage = false;
-
-        await sendWhatsAppText(userPhone, listText);
-
-        const btnCount = Math.min(3, matches.length);
-        const buttons = [];
-        for (let i = 1; i <= btnCount; i++) {
-          buttons.push({ id: `pick_${i}`, title: `${i}` });
-        }
-
-        await sendWhatsAppButtons(userPhone, "Elige una opción:", buttons);
-
-        await setSession(userPhone, session);
-        return;
-      }
-
-      // Elegir de lista
-      if (
-        session.state === "AWAIT_PRODUCT_PICK" &&
-        Array.isArray(session.listResults)
-      ) {
-        const digitMatch = userText.match(/\d+/);
-        const pick = digitMatch ? parseInt(digitMatch[0], 10) : null;
-
-        if (pick && pick >= 1 && pick <= session.listResults.length) {
-          const chosen = session.listResults[pick - 1];
-          if (chosen) {
-            session.product = chosen;
-            session.state = "Q&A";
-            session.listResults = [];
-
-            await sendWhatsAppText(
-              userPhone,
-              `Perfecto 😊✨\nElegiste: *${chosen.name}* 🛒💗\n¿Deseas pedirlo o tienes alguna pregunta?`
-            );
-
-            if (!session.sentImage && chosen.image) {
-              await sendWhatsAppImage(userPhone, chosen.image, chosen.name);
-              session.sentImage = true;
-            }
-
-            await setSession(userPhone, session);
-            return;
-          }
-        }
-
-        await sendWhatsAppText(
-          userPhone,
-          `Dime el número o el nombre del producto 😊\n(Ej: 1, 2, 3 o “loción aloe”) 💗`
-        );
-        await setSession(userPhone, session);
-        return;
-      }
-
-      // Detectar intención de compra
-      const wantsToBuy =
-        lowText.includes("quiero") ||
-        lowText.includes("lo quiero") ||
-        lowText.includes("pedir") ||
-        lowText.includes("comprar") ||
-        lowText.includes("me lo llevo") ||
-        lowText.includes("ordenar") ||
-        lowText === "si" ||
-        lowText === "sí" ||
-        lowText === "ok" ||
-        lowText === "dale" ||
-        lowText === "claro" ||
-        lowText === "perfecto" ||
-        lowText === "de una" ||
-        lowText === "vamos" ||
-        lowText === "esta bien" ||
-        lowText === "está bien";
-
-      let currentProduct = session.product || null;
-
-      const found = findProductForMessage(userText);
-      if (found) {
-        currentProduct = found.data;
-        session.product = currentProduct;
-      }
-
-      // Saludo
-      if (!currentProduct && (lowText === "hola" || lowText.includes("buenas"))) {
-        const greetingName = customerName ? ` ${customerName}` : "";
-        await sendWhatsAppText(
-          userPhone,
-          `¡Hola${greetingName}! 😊✨\nCuéntame, ¿qué producto estás buscando hoy? 💗`
-        );
-        session.state = "INIT";
-        await setSession(userPhone, session);
-        return;
-      }
-
-      // Si no identifica producto
-      if (!currentProduct) {
-        await sendWhatsAppText(
-          userPhone,
-          `Disculpa 😔 no logré identificar el producto.\n¿Me dices el nombre o una palabra? (Ej: “aloe”, “repara”, “exfoliante”) 💗`
-        );
-        session.state = "INIT";
-        await setSession(userPhone, session);
-        return;
-      }
-
-      // Si quiere comprar -> pedir cantidad
-      if (
-        wantsToBuy &&
-        session.state !== "AWAIT_LOCATION" &&
-        session.state !== "AWAIT_PAYMENT"
-      ) {
-        session.state = "AWAIT_QUANTITY";
-        await sendWhatsAppText(
-          userPhone,
-          `Perfecto 😊🛒\n¿Cuántas unidades de *${currentProduct.name}* deseas?`
-        );
-        await setSession(userPhone, session);
-        return;
-      }
-
-      // Esperando cantidad
-      if (session.state === "AWAIT_QUANTITY") {
-        let quantity = null;
-        const digitMatch = userText.match(/\d+/);
-
-        if (digitMatch) quantity = parseInt(digitMatch[0], 10);
-
-        if (!quantity || quantity <= 0) {
-          await sendWhatsAppText(
-            userPhone,
-            "¿Cuántas unidades deseas? 😊\n(Ej: 1, 2, 3)"
-          );
-          await setSession(userPhone, session);
-          return;
-        }
-
-        session.order.quantity = quantity;
-        session.state = "AWAIT_LOCATION";
-
-        await sendWhatsAppText(
-          userPhone,
-          `✅ Anotado: *${quantity}* unidad(es) 😊🛒\nAhora envíame tu ubicación 📍 (clip 📎 > Ubicación > Enviar).`
-        );
-        await setSession(userPhone, session);
-        return;
-      }
-
-      // Q&A normal con IA
-      const aiReply = await callOpenAI(session, currentProduct, userText);
-      await sendWhatsAppText(userPhone, aiReply);
-
-      session.history.push({ user: userText, assistant: aiReply });
-      if (session.history.length > 6) session.history.shift();
-
-      if (!session.sentImage && currentProduct.image) {
-        await sendWhatsAppImage(
-          userPhone,
-          currentProduct.image,
-          currentProduct.name
-        );
-        session.sentImage = true;
-      }
-
-      session.state = "Q&A";
-      await setSession(userPhone, session);
-    }
-
-    // =============================
-    // HANDLERS
-    // =============================
+    // ✅ TEXT
     if (msgType === "text") {
       const userText = msg.text?.body?.trim() || "";
-      await handleUserText(userText);
+      await processUserText({ userPhone, customerName, session, userText });
       return res.sendStatus(200);
     }
 
+    // ✅ AUDIO UPGRADE (NOTA DE VOZ)
     if (msgType === "audio") {
-      await sendWhatsAppText(
-        userPhone,
-        "Recibido 😊🎧 Dame un segundito y te respondo…✨"
-      );
+      try {
+        const mediaId = msg.audio?.id;
+        if (!mediaId) {
+          await sendWhatsAppText(
+            userPhone,
+            "No pude leer el audio 😔\n¿Me lo escribes por favor? 💗"
+          );
+          return res.sendStatus(200);
+        }
 
-      const mediaId = msg.audio?.id;
-      const transcript = await transcribeWhatsAppAudio(mediaId);
+        // 1) Descargar audio desde WhatsApp
+        const { buffer, mimeType } = await fetchWhatsAppMedia(mediaId);
 
-      if (!transcript) {
+        // 2) Transcribir con OpenAI Whisper
+        const transcript = await transcribeAudioToText(buffer, mimeType);
+
+        if (!transcript) {
+          await sendWhatsAppText(
+            userPhone,
+            "No pude entender el audio 😔\n¿Me lo repites más despacito o me lo escribes? 💗"
+          );
+          return res.sendStatus(200);
+        }
+
+        // 3) Procesarlo como texto normal
+        await processUserText({
+          userPhone,
+          customerName,
+          session,
+          userText: transcript,
+        });
+
+        return res.sendStatus(200);
+      } catch (err) {
+        console.error("❌ Error audio:", err);
         await sendWhatsAppText(
           userPhone,
-          "No pude escuchar bien el audio 😔\n¿Me lo repites más despacito o me lo escribes? 💗"
+          "No pude entender el audio 😔\n¿Me lo escribes por favor? 💗"
         );
-        await setSession(userPhone, session);
         return res.sendStatus(200);
       }
-
-      await handleUserText(transcript);
-      return res.sendStatus(200);
     }
 
+    // ✅ LOCATION (finaliza pedido sin pago)
     if (msgType === "location") {
       const loc = msg.location;
       if (!loc) return res.sendStatus(200);
@@ -905,13 +785,34 @@ app.post("/webhook", async (req, res) => {
           address: loc.address || "",
         };
 
-        session.state = "AWAIT_PAYMENT";
-        await sendWhatsAppText(userPhone, "Gracias 😊📍\n¿Cómo prefieres pagar? 💳");
-        await sendWhatsAppButtons(userPhone, "Elige una opción:", [
-          { id: "pay_cash", title: "Contra entrega" },
-          { id: "pay_transfer", title: "Transferencia" },
-        ]);
+        const order = session.order;
+        const productName = session.product?.name || "Producto";
+        const qty = order.quantity || 1;
 
+        await sendWhatsAppText(
+          userPhone,
+          `Perfecto 🤩 unos de nuestros representantes te estará contactando con los detalles de envíos y pagos.`
+        );
+
+        // Admin
+        if (ADMIN_PHONE) {
+          let locationInfo = "";
+          if (order.location?.latitude && order.location?.longitude) {
+            const { latitude, longitude, address, name } = order.location;
+            const mapLink = `https://maps.google.com/?q=${latitude},${longitude}`;
+            locationInfo = `📍 Ubicación: ${name ? name + " - " : ""}${address ? address + " - " : ""}${mapLink}`;
+          }
+
+          const adminMsg = `📦 NUEVO PEDIDO - Glowny Essentials
+Cliente: ${customerName || "Sin nombre"} (${userPhone})
+Producto: ${productName}
+Cantidad: ${qty}
+${locationInfo}`;
+
+          await sendWhatsAppText(ADMIN_PHONE, adminMsg);
+        }
+
+        resetToChooseNewProduct(session);
         await setSession(userPhone, session);
         return res.sendStatus(200);
       }
@@ -920,93 +821,6 @@ app.post("/webhook", async (req, res) => {
         userPhone,
         "Recibí tu ubicación 😊📍\n¿Te ayudo a pedir algún producto? 💗"
       );
-      await setSession(userPhone, session);
-      return res.sendStatus(200);
-    }
-
-    if (msgType === "interactive") {
-      if (msg.interactive?.type === "button_reply") {
-        const buttonId = msg.interactive.button_reply.id;
-
-        // Botones de selección de producto 1/2/3
-        if (session.state === "AWAIT_PRODUCT_PICK" && buttonId.startsWith("pick_")) {
-          const n = parseInt(buttonId.replace("pick_", ""), 10);
-          if (n && session.listResults && session.listResults[n - 1]) {
-            const chosen = session.listResults[n - 1];
-
-            session.product = chosen;
-            session.state = "Q&A";
-            session.listResults = [];
-            session.sentImage = false;
-
-            await sendWhatsAppText(
-              userPhone,
-              `Perfecto 😊✨\nElegiste: *${chosen.name}* 🛒💗\n¿Deseas pedirlo o tienes alguna pregunta?`
-            );
-
-            if (!session.sentImage && chosen.image) {
-              await sendWhatsAppImage(userPhone, chosen.image, chosen.name);
-              session.sentImage = true;
-            }
-
-            await setSession(userPhone, session);
-            return res.sendStatus(200);
-          }
-
-          await sendWhatsAppText(
-            userPhone,
-            "Disculpa 😊💗 no pude seleccionar esa opción. ¿Me dices el número?"
-          );
-          await setSession(userPhone, session);
-          return res.sendStatus(200);
-        }
-
-        // Botones de pago
-        if (session.state === "AWAIT_PAYMENT") {
-          if (buttonId === "pay_cash") session.order.payment = "Contra entrega";
-          if (buttonId === "pay_transfer") session.order.payment = "Transferencia";
-        }
-
-        // Finalizar pedido (mensaje final SIN mostrar pago)
-        if (session.state === "AWAIT_PAYMENT" && session.order.payment) {
-          const order = session.order;
-          const productName = session.product?.name || "Producto";
-          const qty = order.quantity || 1;
-
-          await sendWhatsAppText(
-            userPhone,
-            `Perfecto 🤩 unos de nuestros representantes te estará contactando con los detalles de envíos y pagos. 💗`
-          );
-
-          if (ADMIN_PHONE) {
-            let locationInfo = "";
-            if (order.location?.latitude && order.location?.longitude) {
-              const { latitude, longitude, address, name } = order.location;
-              const mapLink = `https://maps.google.com/?q=${latitude},${longitude}`;
-              locationInfo = `📍 Ubicación: ${name ? name + " - " : ""}${address ? address + " - " : ""}${mapLink}`;
-            }
-
-            const adminMsg = `📦 NUEVO PEDIDO - Glowny Essentials
-Cliente: ${customerName || "Sin nombre"} (${userPhone})
-Producto: ${productName}
-Cantidad: ${qty}
-${locationInfo}`;
-
-            await sendWhatsAppText(ADMIN_PHONE, adminMsg);
-          }
-
-          session.state = "INIT";
-          session.order = {};
-          session.history = [];
-          session.product = null;
-          session.sentImage = false;
-          session.listResults = [];
-
-          await setSession(userPhone, session);
-          return res.sendStatus(200);
-        }
-      }
-
       await setSession(userPhone, session);
       return res.sendStatus(200);
     }
