@@ -151,7 +151,7 @@ function findProductsByKeyword(keyword, limit = 12) {
   return unique.slice(0, limit);
 }
 
-// Detecta si la clienta está pidiendo LISTA
+// Detectar intención de lista
 function isListIntent(textNorm) {
   const t = textNorm || "";
   return (
@@ -170,6 +170,44 @@ function isListIntent(textNorm) {
     t.includes("disponibles") ||
     t.includes("opciones") ||
     t.includes("variedad")
+  );
+}
+
+// ✅ UPGRADE: intención de cambiar producto / salir del modo lista (MEJORADO)
+function isChangeProductIntent(textNorm) {
+  const t = (textNorm || "").trim();
+
+  // Si la persona responde "no" estando en lista, es casi siempre para cambiar
+  if (t === "no" || t === "nop" || t === "nope") return true;
+
+  return (
+    t.includes("otro producto") ||
+    t.includes("otra cosa") ||
+    t.includes("otra opcion") ||
+    t.includes("otra opción") ||
+    t.includes("otro") ||
+    t.includes("cambiar") ||
+    t.includes("diferente") ||
+    t.includes("ninguno") ||
+    t.includes("no quiero") ||
+    t.includes("no me interesa") ||
+    t.includes("no ese") ||
+    t.includes("no ese no") ||
+    t.includes("mejor otro") ||
+    t.includes("quiero otro") ||
+    t.includes("quiero otra") ||
+    t.includes("mandame otro") ||
+    t.includes("mándame otro") ||
+    t.includes("muéstrame otro") ||
+    t.includes("muestrame otro") ||
+    t.includes("dame otro") ||
+    t.includes("dame opciones") ||
+    t.includes("más opciones") ||
+    t.includes("ver mas") ||
+    t.includes("ver más") ||
+    t.includes("volver") ||
+    t.includes("cancelar") ||
+    t.includes("salir")
   );
 }
 
@@ -476,8 +514,22 @@ app.post("/webhook", async (req, res) => {
     async function handleUserText(userText) {
       const lowText = normalizeText(userText);
 
-      // ✅✅ CAMBIO ÚNICO: si estamos esperando que elija un producto de la lista,
-      // ahora puede escoger por número O por nombre/parcial.
+      // ✅✅ UPGRADE: si está eligiendo de lista y responde "no / otro / cambiar..."
+      if (session.state === "AWAIT_PRODUCT_PICK" && isChangeProductIntent(lowText)) {
+        session.state = "INIT";
+        session.listResults = [];
+        session.product = null;
+        session.sentImage = false;
+
+        await sendWhatsAppText(
+          userPhone,
+          "Perfecto 😊💗\nDime qué producto estás buscando ahora (Ej: “aloe”, “colágeno”, “magnesio”). ✨"
+        );
+        await setSession(userPhone, session);
+        return;
+      }
+
+      // Si está esperando elegir de la lista
       if (session.state === "AWAIT_PRODUCT_PICK" && Array.isArray(session.listResults)) {
         // 1) si manda número
         const digitMatch = userText.match(/\d+/);
@@ -505,52 +557,33 @@ app.post("/webhook", async (req, res) => {
           }
         }
 
-        // 2) si manda nombre o parte del nombre
-        const typed = normalizeText(userText);
-        if (typed && typed.length >= 3) {
-          let best = null;
-          let bestScore = 0;
+        // 2) Si no es número, tomarlo como nueva palabra clave (cambia lista)
+        const newKeyword = extractMainKeyword(userText);
+        const newMatches = findProductsByKeyword(newKeyword, 12);
 
-          for (const p of session.listResults) {
-            const pName = normalizeText(p?.name || "");
-            if (!pName) continue;
+        if (newKeyword && newMatches.length > 0) {
+          let listText = `✨ Estos son los productos que tengo con *${newKeyword}*:\n\n`;
+          newMatches.forEach((p, i) => {
+            listText += `${i + 1}) *${p.name}* — RD$${p.price}\n`;
+          });
+          listText += `\n💗 Dime el número o el nombre del que te interesa 😊`;
 
-            // Score simple: si contiene el texto o viceversa
-            let score = 0;
-            if (pName.includes(typed)) score += 5;
-            if (typed.includes(pName)) score += 2;
+          session.listResults = newMatches;
+          session.state = "AWAIT_PRODUCT_PICK";
+          session.product = null;
+          session.sentImage = false;
 
-            // score extra por palabras en común
-            const typedWords = typed.split(" ").filter(Boolean);
-            const nameWords = pName.split(" ").filter(Boolean);
-            const common = typedWords.filter((w) => nameWords.includes(w)).length;
-            score += common;
+          await sendWhatsAppText(userPhone, listText);
 
-            if (score > bestScore) {
-              bestScore = score;
-              best = p;
-            }
+          const btnCount = Math.min(3, newMatches.length);
+          const buttons = [];
+          for (let i = 1; i <= btnCount; i++) {
+            buttons.push({ id: `pick_${i}`, title: `${i}` });
           }
+          await sendWhatsAppButtons(userPhone, "Elige una opción:", buttons);
 
-          if (best && bestScore >= 2) {
-            session.product = best;
-            session.state = "Q&A";
-            session.listResults = [];
-            session.sentImage = false;
-
-            await sendWhatsAppText(
-              userPhone,
-              `Perfecto 😊✨\nElegiste: *${best.name}* 🛒💗\n¿Deseas pedirlo o tienes alguna pregunta?`
-            );
-
-            if (!session.sentImage && best.image) {
-              await sendWhatsAppImage(userPhone, best.image, best.name);
-              session.sentImage = true;
-            }
-
-            await setSession(userPhone, session);
-            return;
-          }
+          await setSession(userPhone, session);
+          return;
         }
 
         // si no logró seleccionar
@@ -628,44 +661,6 @@ app.post("/webhook", async (req, res) => {
       if (found) {
         currentProduct = found.data;
         session.product = currentProduct;
-      }
-
-      // ✅✅ Si escribe SOLO palabra y hay varios productos, lista + botones
-      const keywordSolo = extractMainKeyword(userText);
-      const multipleMatches = findProductsByKeyword(keywordSolo, 8);
-
-      const isShortKeywordMessage =
-        normalizeText(userText).split(" ").filter(Boolean).length <= 2;
-
-      if (
-        isShortKeywordMessage &&
-        keywordSolo &&
-        multipleMatches.length >= 2 &&
-        !wantsToBuy
-      ) {
-        let listText = `😊 Tengo varias opciones con *${keywordSolo}*:\n\n`;
-        multipleMatches.forEach((p, i) => {
-          listText += `${i + 1}) *${p.name}* — RD$${p.price}\n`;
-        });
-        listText += `\n💗 Elige el número o dime el nombre 😊`;
-
-        session.listResults = multipleMatches;
-        session.state = "AWAIT_PRODUCT_PICK";
-        session.product = null;
-        session.sentImage = false;
-
-        await sendWhatsAppText(userPhone, listText);
-
-        const btnCount = Math.min(3, multipleMatches.length);
-        const buttons = [];
-        for (let i = 1; i <= btnCount; i++) {
-          buttons.push({ id: `pick_${i}`, title: `${i}` });
-        }
-
-        await sendWhatsAppButtons(userPhone, "Elige una opción:", buttons);
-
-        await setSession(userPhone, session);
-        return;
       }
 
       // Saludo
@@ -809,7 +804,7 @@ app.post("/webhook", async (req, res) => {
       if (msg.interactive?.type === "button_reply") {
         const buttonId = msg.interactive.button_reply.id;
 
-        // Botones de selección de producto 1/2/3 (igual)
+        // Botones de selección de producto 1/2/3
         if (session.state === "AWAIT_PRODUCT_PICK" && buttonId.startsWith("pick_")) {
           const n = parseInt(buttonId.replace("pick_", ""), 10);
           if (n && session.listResults && session.listResults[n - 1]) {
@@ -839,13 +834,13 @@ app.post("/webhook", async (req, res) => {
           return res.sendStatus(200);
         }
 
-        // Botones de pago (igual)
+        // Botones de pago
         if (session.state === "AWAIT_PAYMENT") {
           if (buttonId === "pay_cash") session.order.payment = "Contra entrega";
           if (buttonId === "pay_transfer") session.order.payment = "Transferencia";
         }
 
-        // Finalizar pedido si ya hay pago (mensaje final nuevo SIN pago)
+        // Finalizar pedido (mensaje final SIN mostrar pago)
         if (session.state === "AWAIT_PAYMENT" && session.order.payment) {
           const order = session.order;
           const productName = session.product?.name || "Producto";
