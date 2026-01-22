@@ -85,7 +85,7 @@ const productIndex = catalog.map((prod) => {
   };
 });
 
-// Match 1 producto (se mantiene igual)
+// Match 1 producto
 function findProductForMessage(message) {
   const msgNorm = normalizeText(message);
   const msgWords = new Set(
@@ -173,15 +173,15 @@ function isListIntent(textNorm) {
   );
 }
 
-// ✅ UPGRADE: intención de cambiar producto / salir del modo lista (MEJORADO)
+// ✅ intención de cambiar producto / salir del modo lista o del flujo de compra
 function isChangeProductIntent(textNorm) {
   const t = (textNorm || "").trim();
 
-  // Si la persona responde "no" estando en lista, es casi siempre para cambiar
   if (t === "no" || t === "nop" || t === "nope") return true;
 
   return (
     t.includes("otro producto") ||
+    t.includes("quiero otro producto") ||
     t.includes("otra cosa") ||
     t.includes("otra opcion") ||
     t.includes("otra opción") ||
@@ -192,7 +192,6 @@ function isChangeProductIntent(textNorm) {
     t.includes("no quiero") ||
     t.includes("no me interesa") ||
     t.includes("no ese") ||
-    t.includes("no ese no") ||
     t.includes("mejor otro") ||
     t.includes("quiero otro") ||
     t.includes("quiero otra") ||
@@ -267,7 +266,6 @@ async function setSession(userId, sessionData) {
 
 // =============================
 // WHATSAPP CLOUD API (FIX)
-// ✅ messaging_product: "whatsapp"
 // =============================
 async function waSend(payload) {
   if (!WA_TOKEN || !PHONE_NUMBER_ID) {
@@ -514,11 +512,18 @@ app.post("/webhook", async (req, res) => {
     async function handleUserText(userText) {
       const lowText = normalizeText(userText);
 
-      // ✅✅ UPGRADE: si está eligiendo de lista y responde "no / otro / cambiar..."
-      if (session.state === "AWAIT_PRODUCT_PICK" && isChangeProductIntent(lowText)) {
+      // ✅✅✅ FIX PRINCIPAL:
+      // Si la persona dice "quiero otro producto" (o "otro/cambiar") NO se toma como compra.
+      // Se resetea el flujo de pedido y se pide el nuevo producto.
+      if (
+        isChangeProductIntent(lowText) &&
+        session.state !== "AWAIT_LOCATION" &&
+        session.state !== "AWAIT_PAYMENT"
+      ) {
         session.state = "INIT";
-        session.listResults = [];
+        session.order = {};
         session.product = null;
+        session.listResults = [];
         session.sentImage = false;
 
         await sendWhatsAppText(
@@ -531,7 +536,6 @@ app.post("/webhook", async (req, res) => {
 
       // Si está esperando elegir de la lista
       if (session.state === "AWAIT_PRODUCT_PICK" && Array.isArray(session.listResults)) {
-        // 1) si manda número
         const digitMatch = userText.match(/\d+/);
         const pick = digitMatch ? parseInt(digitMatch[0], 10) : null;
 
@@ -557,7 +561,6 @@ app.post("/webhook", async (req, res) => {
           }
         }
 
-        // 2) Si no es número, tomarlo como nueva palabra clave (cambia lista)
         const newKeyword = extractMainKeyword(userText);
         const newMatches = findProductsByKeyword(newKeyword, 12);
 
@@ -586,7 +589,6 @@ app.post("/webhook", async (req, res) => {
           return;
         }
 
-        // si no logró seleccionar
         await sendWhatsAppText(
           userPhone,
           `Dime el número o el nombre del producto 😊\n(Ej: 1, 2, 3 o “loción aloe”) 💗`
@@ -634,6 +636,34 @@ app.post("/webhook", async (req, res) => {
 
         await setSession(userPhone, session);
         return;
+      }
+
+      // ✅ FIX EXTRA: Si estaba esperando cantidad y el usuario escribe un producto (ej: "colágeno"),
+      // cambiamos al producto y NO insistimos con "¿cuántas unidades?"
+      if (session.state === "AWAIT_QUANTITY") {
+        const digitMatch = userText.match(/\d+/);
+        if (!digitMatch) {
+          const maybeNew = findProductForMessage(userText);
+          if (maybeNew?.data) {
+            session.product = maybeNew.data;
+            session.state = "Q&A";
+            session.order = {};
+            session.sentImage = false;
+
+            await sendWhatsAppText(
+              userPhone,
+              `Entendido 😊✨\nHablemos de *${session.product.name}* 💗\n¿Quieres que te ayude a pedirlo o tienes una pregunta? 🛒`
+            );
+
+            if (session.product.image) {
+              await sendWhatsAppImage(userPhone, session.product.image, session.product.name);
+              session.sentImage = true;
+            }
+
+            await setSession(userPhone, session);
+            return;
+          }
+        }
       }
 
       // Detectar intención de compra (y confirmaciones)
