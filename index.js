@@ -491,8 +491,27 @@ async function sendToChatwoot({ session, from, name, message }) {
       { headers: chatwootHeaders() }
     );
   } catch (err) {
-    console.error("❌ Chatwoot mensaje:", err?.response?.data || err.message);
+    const data = err?.response?.data || err?.message || err;
+
+    // ✅ Si el inbox no es API, Chatwoot devuelve este error
+    const msg =
+      (typeof data === "object" ? JSON.stringify(data) : String(data)) || "";
+
+    if (msg.toLowerCase().includes("only allowed in api inboxes")) {
+      console.error(
+        "⚠️ Chatwoot: Incoming messages solo permitidos en API inboxes. El bot seguirá normal."
+      );
+      return;
+    }
+
+    console.error("❌ Chatwoot mensaje:", data);
   }
+}
+
+// ✅ NO BLOQUEAR EL BOT: manda a chatwoot en background
+function safeSendToChatwoot(payload) {
+  // 🔥 importantísimo: NO usar await aquí
+  sendToChatwoot(payload).catch(() => {});
 }
 
 // ✅ Webhook para recibir respuestas del agente (Chatwoot → WhatsApp)
@@ -724,8 +743,8 @@ app.post("/webhook", async (req, res) => {
     async function handleText(userText) {
       const lowText = normalizeText(userText);
 
-      // ✅ Enviar SIEMPRE a Chatwoot para que puedas ver conversaciones
-      await sendToChatwoot({
+      // ✅ Enviar SIEMPRE a Chatwoot en background (NO BLOQUEAR BOT)
+      safeSendToChatwoot({
         session,
         from: userPhone,
         name: customerName || userPhone,
@@ -840,7 +859,10 @@ app.post("/webhook", async (req, res) => {
       }
 
       // Saludo
-      if (!currentProduct && (lowText === "hola" || lowText.includes("buenas"))) {
+      if (
+        !currentProduct &&
+        (lowText === "hola" || lowText.includes("buenas"))
+      ) {
         const greetingName = customerName ? ` ${customerName}` : "";
         await sendWhatsAppText(
           userPhone,
@@ -944,7 +966,11 @@ app.post("/webhook", async (req, res) => {
 
       // Enviar imagen una vez
       if (!session.sentImage && currentProduct.image) {
-        await sendWhatsAppImage(userPhone, currentProduct.image, currentProduct.name);
+        await sendWhatsAppImage(
+          userPhone,
+          currentProduct.image,
+          currentProduct.name
+        );
         session.sentImage = true;
       }
 
@@ -969,9 +995,11 @@ app.post("/webhook", async (req, res) => {
       const mediaId = msg.audio?.id;
 
       if (!mediaId) {
-        const fallback = "Recibido 😊✨\nNo pude escuchar bien el audio. ¿Me lo escribes por favor? 💗";
+        const fallback =
+          "Recibido 😊✨\nNo pude escuchar bien el audio. ¿Me lo escribes por favor? 💗";
 
-        await sendToChatwoot({
+        // ✅ background
+        safeSendToChatwoot({
           session,
           from: userPhone,
           name: customerName || userPhone,
@@ -991,9 +1019,10 @@ app.post("/webhook", async (req, res) => {
       const transcript = await transcribeWhatsAppAudio(mediaId);
 
       if (!transcript) {
-        const fallback = "Recibido 😊✨\nNo pude entender el audio. ¿Me lo escribes por favor? 💗";
+        const fallback =
+          "Recibido 😊✨\nNo pude entender el audio. ¿Me lo escribes por favor? 💗";
 
-        await sendToChatwoot({
+        safeSendToChatwoot({
           session,
           from: userPhone,
           name: customerName || userPhone,
@@ -1010,7 +1039,7 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      await sendToChatwoot({
+      safeSendToChatwoot({
         session,
         from: userPhone,
         name: customerName || userPhone,
@@ -1033,7 +1062,7 @@ app.post("/webhook", async (req, res) => {
           ? `📍 Ubicación enviada: https://maps.google.com/?q=${loc.latitude},${loc.longitude}`
           : "📍 Ubicación enviada";
 
-      await sendToChatwoot({
+      safeSendToChatwoot({
         session,
         from: userPhone,
         name: customerName || userPhone,
@@ -1067,7 +1096,9 @@ app.post("/webhook", async (req, res) => {
           if (order.location?.latitude && order.location?.longitude) {
             const { latitude, longitude, address, name } = order.location;
             const mapLink = `https://maps.google.com/?q=${latitude},${longitude}`;
-            locationInfo = `📍 Ubicación: ${name ? name + " - " : ""}${address ? address + " - " : ""}${mapLink}`;
+            locationInfo = `📍 Ubicación: ${name ? name + " - " : ""}${
+              address ? address + " - " : ""
+            }${mapLink}`;
           }
 
           const adminMsg = `📦 NUEVO PEDIDO - Glowny Essentials
