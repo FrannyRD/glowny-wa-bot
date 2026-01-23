@@ -326,8 +326,8 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
 }
 
 // =============================
-// ✅ CHATWOOT (Opción 2 - Inbox)
-// Sin dañar tu lógica: solo replica mensajes para que los veas.
+// ✅ CHATWOOT (ARREGLADO)
+// Solo replica mensajes para verlos y poder responder.
 // =============================
 function chatwootEnabled() {
   return (
@@ -338,20 +338,28 @@ function chatwootEnabled() {
   );
 }
 
-function chatwootHeaders() {
-  return { api_access_token: CHATWOOT_API_TOKEN };
+function cwBase() {
+  return String(CHATWOOT_BASE_URL || "").replace(/\/+$/, "");
 }
 
-// Crear/obtener contacto
+function chatwootHeaders() {
+  return {
+    api_access_token: CHATWOOT_API_TOKEN,
+    "Content-Type": "application/json",
+  };
+}
+
+// ✅ Crear/obtener contacto (100% compatible)
 async function cwGetOrCreateContact({ phone, name }) {
   if (!chatwootEnabled()) return null;
 
   const cleanPhone = onlyDigits(phone);
+  if (!cleanPhone) return null;
 
+  // 1) Buscar contacto
   try {
-    // Buscar contacto
     const searchRes = await axios.get(
-      `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts/search`,
+      `${cwBase()}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts/search`,
       {
         params: { q: cleanPhone },
         headers: chatwootHeaders(),
@@ -360,28 +368,33 @@ async function cwGetOrCreateContact({ phone, name }) {
 
     const found = searchRes.data?.payload?.[0];
     if (found?.id) return found.id;
-  } catch (_) {
-    // Ignorar
-  }
+  } catch (_) {}
 
+  // 2) Crear contacto
   try {
-    // Crear contacto
     const createRes = await axios.post(
-      `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts`,
+      `${cwBase()}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts`,
       {
-        inbox_id: Number(CHATWOOT_INBOX_ID),
         name: name || cleanPhone,
         phone_number: cleanPhone,
       },
       { headers: chatwootHeaders() }
     );
 
-    return createRes.data?.payload?.contact?.id || null;
+    // Chatwoot puede devolverlo de distintas formas
+    const createdId =
+      createRes.data?.payload?.contact?.id ||
+      createRes.data?.payload?.id ||
+      createRes.data?.contact?.id ||
+      createRes.data?.id ||
+      null;
+
+    if (createdId) return createdId;
   } catch (err) {
-    // Si ya existe, intentar buscar otra vez
+    // Si falló por duplicado, intentar buscar otra vez
     try {
       const searchRes2 = await axios.get(
-        `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts/search`,
+        `${cwBase()}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts/search`,
         {
           params: { q: cleanPhone },
           headers: chatwootHeaders(),
@@ -393,11 +406,12 @@ async function cwGetOrCreateContact({ phone, name }) {
     } catch (_) {}
 
     console.error("❌ Chatwoot contacto:", err?.response?.data || err.message);
-    return null;
   }
+
+  return null;
 }
 
-// Crear conversación (y guardarla en sesión para no duplicar)
+// ✅ Crear conversación y guardarla en sesión
 async function cwGetOrCreateConversation({ session, phone, contactId }) {
   if (!chatwootEnabled()) return null;
 
@@ -405,25 +419,38 @@ async function cwGetOrCreateConversation({ session, phone, contactId }) {
 
   try {
     const convRes = await axios.post(
-      `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/conversations`,
+      `${cwBase()}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/conversations`,
       {
-        source_id: onlyDigits(phone), // identificador fijo para el cliente
+        source_id: onlyDigits(phone), // identificador fijo por cliente
         inbox_id: Number(CHATWOOT_INBOX_ID),
         contact_id: contactId,
       },
       { headers: chatwootHeaders() }
     );
 
-    const conversationId = convRes.data?.id || null;
-    if (conversationId) session.cw_conversation_id = conversationId;
-    return conversationId;
+    // Chatwoot puede devolver id en payload también
+    const conversationId =
+      convRes.data?.id ||
+      convRes.data?.payload?.id ||
+      convRes.data?.payload?.conversation?.id ||
+      null;
+
+    if (conversationId) {
+      session.cw_conversation_id = conversationId;
+      return conversationId;
+    }
+
+    return null;
   } catch (err) {
-    console.error("❌ Chatwoot conversación:", err?.response?.data || err.message);
+    console.error(
+      "❌ Chatwoot conversación:",
+      err?.response?.data || err.message
+    );
     return null;
   }
 }
 
-// Enviar mensaje entrante a Chatwoot (para que lo veas)
+// ✅ Enviar mensaje entrante a Chatwoot (para verlo)
 async function sendToChatwoot({ session, from, name, message }) {
   if (!chatwootEnabled()) return;
 
@@ -444,7 +471,7 @@ async function sendToChatwoot({ session, from, name, message }) {
     if (!conversationId) return;
 
     await axios.post(
-      `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/conversations/${conversationId}/messages`,
+      `${cwBase()}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/conversations/${conversationId}/messages`,
       {
         content: message,
         message_type: "incoming",
@@ -462,13 +489,24 @@ app.post("/chatwoot/webhook", async (req, res) => {
   try {
     const event = req.body;
 
-    // Solo mensajes salientes del agente
-    if (event?.message_type !== "outgoing") return res.sendStatus(200);
+    // ✅ Chatwoot manda message_type como "outgoing" o como 1
+    const mt = event?.message_type;
+    const isOutgoing = mt === "outgoing" || mt === 1;
 
-    const content = event?.content;
-    const phone = event?.conversation?.meta?.sender?.phone_number;
+    if (!isOutgoing) return res.sendStatus(200);
 
-    if (!phone || !content) return res.sendStatus(200);
+    const content = event?.content?.trim();
+    if (!content) return res.sendStatus(200);
+
+    // ✅ El teléfono puede venir en varias rutas
+    const phone =
+      event?.conversation?.meta?.sender?.phone_number ||
+      event?.conversation?.contact?.phone_number ||
+      event?.conversation?.contact_inbox?.source_id ||
+      event?.conversation?.meta?.sender?.identifier ||
+      null;
+
+    if (!phone) return res.sendStatus(200);
 
     const userPhone = onlyDigits(phone);
 
@@ -482,6 +520,8 @@ app.post("/chatwoot/webhook", async (req, res) => {
     session.human_until = Date.now() + 30 * 60 * 1000;
 
     await setSession(userPhone, session);
+
+    // ✅ Enviar respuesta humana al WhatsApp del cliente
     await sendWhatsAppText(userPhone, content);
 
     return res.sendStatus(200);
