@@ -34,6 +34,19 @@ function onlyDigits(phone) {
   return String(phone || "").replace(/\D/g, "");
 }
 
+// ✅ FIX E164 (Chatwoot exige +1XXXXXXXXXX para RD)
+function toE164(phone) {
+  const d = onlyDigits(phone);
+  if (!d) return null;
+
+  // RD usa +1 (NANP)
+  if (d.length === 10) return `+1${d}`; // 809XXXXXXX -> +1809XXXXXXX
+  if (d.length === 11 && d.startsWith("1")) return `+${d}`; // 1809XXXXXXX -> +1809XXXXXXX
+
+  // fallback por si llega diferente
+  return `+${d}`;
+}
+
 const ADMIN_PHONE = onlyDigits(ADMIN_PHONE_RAW);
 
 // Cargar catálogo
@@ -349,12 +362,13 @@ function chatwootHeaders() {
   };
 }
 
-// ✅ Crear/obtener contacto (100% compatible)
+// ✅ Crear/obtener contacto (FIX E164 aquí)
 async function cwGetOrCreateContact({ phone, name }) {
   if (!chatwootEnabled()) return null;
 
   const cleanPhone = onlyDigits(phone);
-  if (!cleanPhone) return null;
+  const e164Phone = toE164(cleanPhone); // ✅ FIX
+  if (!cleanPhone || !e164Phone) return null;
 
   // 1) Buscar contacto
   try {
@@ -376,12 +390,11 @@ async function cwGetOrCreateContact({ phone, name }) {
       `${cwBase()}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts`,
       {
         name: name || cleanPhone,
-        phone_number: cleanPhone,
+        phone_number: e164Phone, // ✅ FIX: Chatwoot exige E164
       },
       { headers: chatwootHeaders() }
     );
 
-    // Chatwoot puede devolverlo de distintas formas
     const createdId =
       createRes.data?.payload?.contact?.id ||
       createRes.data?.payload?.id ||
@@ -428,7 +441,6 @@ async function cwGetOrCreateConversation({ session, phone, contactId }) {
       { headers: chatwootHeaders() }
     );
 
-    // Chatwoot puede devolver id en payload también
     const conversationId =
       convRes.data?.id ||
       convRes.data?.payload?.id ||
@@ -498,7 +510,6 @@ app.post("/chatwoot/webhook", async (req, res) => {
     const content = event?.content?.trim();
     if (!content) return res.sendStatus(200);
 
-    // ✅ El teléfono puede venir en varias rutas
     const phone =
       event?.conversation?.meta?.sender?.phone_number ||
       event?.conversation?.contact?.phone_number ||
@@ -896,7 +907,6 @@ app.post("/webhook", async (req, res) => {
         if (digitMatch) quantity = parseInt(digitMatch[0], 10);
 
         if (!quantity || quantity <= 0) {
-          // ✅ aquí antes se quedaba trabado: ahora si el texto NO es número, lo tratamos como búsqueda
           const matches = searchProductsByKeyword(userText);
           if (matches.length >= 2) {
             session.listCandidates = matches.slice(0, 12).map((x) => x.data);
@@ -968,7 +978,6 @@ app.post("/webhook", async (req, res) => {
           message: "🎤 Nota de voz recibida (no pude leer el mediaId).",
         });
 
-        // Si hay humano activo, no responder
         if (session.human_until && Date.now() < session.human_until) {
           await setSession(userPhone, session);
           return res.sendStatus(200);
@@ -991,7 +1000,6 @@ app.post("/webhook", async (req, res) => {
           message: "🎤 Nota de voz recibida (no se pudo transcribir).",
         });
 
-        // Si hay humano activo, no responder
         if (session.human_until && Date.now() < session.human_until) {
           await setSession(userPhone, session);
           return res.sendStatus(200);
@@ -1002,7 +1010,6 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // ✅ mandar transcripción a Chatwoot para que tú la veas
       await sendToChatwoot({
         session,
         from: userPhone,
@@ -1010,7 +1017,6 @@ app.post("/webhook", async (req, res) => {
         message: `🎤 Nota de voz transcrita: ${transcript}`,
       });
 
-      // ✅ ahora procesa el texto transcrito como si lo hubiera escrito
       await handleText(transcript);
       return res.sendStatus(200);
     }
@@ -1022,11 +1028,11 @@ app.post("/webhook", async (req, res) => {
       const loc = msg.location;
       if (!loc) return res.sendStatus(200);
 
-      // ✅ Enviar a Chatwoot también
       const mapPreview =
         loc.latitude && loc.longitude
           ? `📍 Ubicación enviada: https://maps.google.com/?q=${loc.latitude},${loc.longitude}`
           : "📍 Ubicación enviada";
+
       await sendToChatwoot({
         session,
         from: userPhone,
@@ -1034,7 +1040,6 @@ app.post("/webhook", async (req, res) => {
         message: mapPreview,
       });
 
-      // ✅ Si hay humano activo, no responder
       if (session.human_until && Date.now() < session.human_until) {
         await setSession(userPhone, session);
         return res.sendStatus(200);
@@ -1048,13 +1053,11 @@ app.post("/webhook", async (req, res) => {
           address: loc.address || "",
         };
 
-        // ✅ MENSAJE FINAL NUEVO (NO PAGO)
         await sendWhatsAppText(
           userPhone,
           "Perfecto 🤩 unos de nuestros representantes te estará contactando con los detalles de envíos y pagos."
         );
 
-        // ✅ ENVIAR AL ADMIN con detalles para coordinar manual
         if (ADMIN_PHONE) {
           const order = session.order;
           const productName = session.product?.name || "Producto";
@@ -1076,7 +1079,6 @@ ${locationInfo}`;
           await sendWhatsAppText(ADMIN_PHONE, adminMsg);
         }
 
-        // ✅ RESET sesión
         session.state = "INIT";
         session.order = {};
         session.history = [];
@@ -1096,9 +1098,6 @@ ${locationInfo}`;
       return res.sendStatus(200);
     }
 
-    // =============================
-    // DEFAULT
-    // =============================
     await setSession(userPhone, session);
     return res.sendStatus(200);
   } catch (err) {
