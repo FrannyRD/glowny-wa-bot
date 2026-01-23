@@ -21,7 +21,7 @@ const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_TOKEN =
   process.env.UPSTASH_REST_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
 
-// ✅ CHATWOOT (Opción 2 - Inbox)
+// ✅ CHATWOOT
 const CHATWOOT_BASE_URL = process.env.CHATWOOT_BASE_URL;
 const CHATWOOT_ACCOUNT_ID = process.env.CHATWOOT_ACCOUNT_ID;
 const CHATWOOT_INBOX_ID = process.env.CHATWOOT_INBOX_ID;
@@ -487,6 +487,7 @@ async function cwGetOrCreateConversation({ session, phone, contactId }) {
   }
 }
 
+// ✅ FIX DEFINITIVO: message_type = 0 (incoming real)
 async function sendToChatwoot({ session, from, name, message }) {
   if (!chatwootEnabled()) return;
 
@@ -510,7 +511,7 @@ async function sendToChatwoot({ session, from, name, message }) {
       `${cwBase()}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/conversations/${conversationId}/messages`,
       {
         content: message,
-        message_type: "incoming",
+        message_type: 0, // ✅ INCOMING (evita error al enviar)
         private: false,
       },
       { headers: chatwootHeaders() }
@@ -520,8 +521,7 @@ async function sendToChatwoot({ session, from, name, message }) {
   }
 }
 
-// ✅ FIX DEFINITIVO:
-// Log del BOT como NOTA PRIVADA en Chatwoot (se ve ahí, pero NO se reenvía a WhatsApp)
+// ✅ BOT LOG COMO NOTA PRIVADA: message_type = 1 + private true
 async function sendBotToChatwoot({ session, from, name, message }) {
   if (!chatwootEnabled()) return;
 
@@ -545,8 +545,8 @@ async function sendBotToChatwoot({ session, from, name, message }) {
       `${cwBase()}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/conversations/${conversationId}/messages`,
       {
         content: message,
-        message_type: "outgoing",
-        private: true, // ✅ CLAVE: NO SALDRÁ A WHATSAPP DESDE WEBHOOK
+        message_type: 1, // ✅ OUTGOING
+        private: true, // ✅ NO SE REENVÍA A WA
       },
       { headers: chatwootHeaders() }
     );
@@ -560,13 +560,24 @@ app.post("/chatwoot/webhook", async (req, res) => {
   try {
     const event = req.body;
 
+    // message_type puede venir string o número
     const mt = event?.message_type;
     const isOutgoing = mt === "outgoing" || mt === 1;
 
     if (!isOutgoing) return res.sendStatus(200);
 
-    // ✅ FIX: Ignorar PRIVATE NOTES (incluye logs del bot)
+    // ✅ FIX: Ignorar private notes
     if (event?.private === true) return res.sendStatus(200);
+
+    // ✅ FIX: Solo si el sender es HUMANO (agente)
+    const senderType = String(event?.sender?.type || "").toLowerCase();
+    if (senderType && senderType !== "user") {
+      // sender.type en chatwoot normalmente:
+      // "user" = agente/humano
+      // "contact" = cliente
+      // "agent_bot" / "bot" = bot
+      return res.sendStatus(200);
+    }
 
     const content = event?.content?.trim();
     if (!content) return res.sendStatus(200);
@@ -783,7 +794,6 @@ app.post("/webhook", async (req, res) => {
     async function botReply(text) {
       await sendWhatsAppText(userPhone, text);
 
-      // ✅ NOTA PRIVADA para ver el texto del bot en Chatwoot (SIN duplicar en WhatsApp)
       await sendBotToChatwoot({
         session,
         from: userPhone,
@@ -805,18 +815,18 @@ app.post("/webhook", async (req, res) => {
         message: userText,
       });
 
+      // ✅ si humano está atendiendo, bot pausa
       if (session.human_until && Date.now() < session.human_until) {
         await setSession(userPhone, session);
         return;
       }
 
-      // ✅ FIX ANTI-DUPLICADO DE SALUDO (NO DAÑA NADA)
+      // ✅ ANTI-DUPLICADO DE SALUDO
       const greetingOnly = isGreetingOnly(userText);
       if (greetingOnly) {
         const now = Date.now();
         const last = session.last_greeting_reply_ts || 0;
 
-        // si ya respondimos saludo en los últimos 10s, ignorar
         if (now - last < 10000) {
           await setSession(userPhone, session);
           return;
