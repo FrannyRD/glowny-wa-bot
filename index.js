@@ -165,9 +165,18 @@ function findProductForMessage(message) {
 // ✅ Buscar MUCHOS productos por palabra (ALOE, REPARA, EXFOLIANTE, etc.)
 function searchProductsByKeyword(message) {
   const msgNorm = normalizeText(message);
+
+  // ✅✅✅ FIX REAL:
+  // Ignorar tokens de 1-2 letras para evitar matches falsos con "si", "ok", etc.
   const tokens = msgNorm
     .split(" ")
-    .filter((w) => w && !SPANISH_STOPWORDS.has(w) && !BRAND_WORDS.has(w));
+    .filter(
+      (w) =>
+        w &&
+        w.length >= 3 && // ✅ FIX AQUÍ
+        !SPANISH_STOPWORDS.has(w) &&
+        !BRAND_WORDS.has(w)
+    );
 
   if (tokens.length === 0) return [];
 
@@ -500,7 +509,6 @@ async function sendToChatwoot({ session, from, name, message }) {
 }
 
 // ✅ Webhook para recibir respuestas del agente (Chatwoot → WhatsApp)
-// Cuando respondas manual, el bot se calla 30 min para esa clienta.
 app.post("/chatwoot/webhook", async (req, res) => {
   try {
     const event = req.body;
@@ -700,7 +708,7 @@ app.post("/webhook", async (req, res) => {
     const msg = messages[0];
     const userPhone = msg.from;
     const msgType = msg.type;
-    const msgId = msg.id; // ✅ para dedupe
+    const msgId = msg.id;
 
     const customerName = value?.contacts?.[0]?.profile?.name || "";
 
@@ -710,7 +718,7 @@ app.post("/webhook", async (req, res) => {
     if (!session.state) session.state = "INIT";
     if (!session.listCandidates) session.listCandidates = null;
 
-    // ✅ DEDUPE: si Meta reintenta el mismo mensaje, no duplicamos respuesta
+    // ✅ DEDUPE
     if (msgId && session.last_wa_msg_id === msgId) {
       return res.sendStatus(200);
     }
@@ -718,18 +726,13 @@ app.post("/webhook", async (req, res) => {
       session.last_wa_msg_id = msgId;
     }
 
-    // ✅ Si el modo humano expiró, lo quitamos
     if (session.human_until && Date.now() > session.human_until) {
       session.human_until = null;
     }
 
-    // =============================
-    // FUNCIÓN PRINCIPAL DE TEXTO
-    // =============================
     async function handleText(userText) {
       const lowText = normalizeText(userText);
 
-      // ✅ Enviar SIEMPRE a Chatwoot para que puedas ver conversaciones
       await sendToChatwoot({
         session,
         from: userPhone,
@@ -737,13 +740,11 @@ app.post("/webhook", async (req, res) => {
         message: userText,
       });
 
-      // ✅ Si hay humano activo, el bot NO responde
       if (session.human_until && Date.now() < session.human_until) {
         await setSession(userPhone, session);
         return;
       }
 
-      // ✅ si dice "otro producto" en cualquier momento, resetea a catálogo
       const wantsOther =
         lowText.includes("otro producto") ||
         lowText === "otro" ||
@@ -766,7 +767,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // ✅✅✅ FIX #1: Si estamos esperando seleccionar producto, procesar esto ANTES de lista/búsqueda
       if (
         session.state === "AWAIT_PRODUCT_SELECTION" &&
         session.listCandidates
@@ -789,7 +789,6 @@ app.post("/webhook", async (req, res) => {
           }
         }
 
-        // si escribió nombre
         const foundByName = findProductForMessage(userText);
         if (foundByName) {
           session.product = foundByName.data;
@@ -812,14 +811,14 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // ✅✅✅ FIX #2: SOLO activar lista por "mensaje corto" si NO es número
-      // y SI estamos en INIT o Q&A (no cuando se espera cantidad)
       const allowShortSearch =
         !isNumericOnly(userText) &&
         (session.state === "INIT" || session.state === "Q&A");
 
-      // ✅ si el usuario pidió lista
-      if (isListRequest(userText) || (allowShortSearch && lowText.split(" ").length <= 2)) {
+      if (
+        isListRequest(userText) ||
+        (allowShortSearch && lowText.split(" ").length <= 2)
+      ) {
         const matches = searchProductsByKeyword(userText);
         if (matches.length >= 2) {
           session.listCandidates = matches.slice(0, 12).map((x) => x.data);
@@ -831,7 +830,6 @@ app.post("/webhook", async (req, res) => {
         }
       }
 
-      // Detectar intención de compra (más flexible)
       const wantsToBuy =
         lowText.includes("quiero") ||
         lowText.includes("lo quiero") ||
@@ -843,7 +841,6 @@ app.post("/webhook", async (req, res) => {
         lowText === "si" ||
         lowText === "sí";
 
-      // Buscar producto
       let currentProduct = session.product || null;
       const found = findProductForMessage(userText);
       if (found) {
@@ -851,8 +848,10 @@ app.post("/webhook", async (req, res) => {
         session.product = currentProduct;
       }
 
-      // Saludo
-      if (!currentProduct && (lowText === "hola" || lowText.includes("buenas"))) {
+      if (
+        !currentProduct &&
+        (lowText === "hola" || lowText.includes("buenas"))
+      ) {
         const greetingName = customerName ? ` ${customerName}` : "";
         await sendWhatsAppText(
           userPhone,
@@ -863,7 +862,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // Si no se identifica producto
       if (!currentProduct) {
         const matches = searchProductsByKeyword(userText);
         if (matches.length >= 2) {
@@ -883,7 +881,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // Si estaba esperando cantidad y manda nombre de otro producto -> cambiar producto
       if (session.state === "AWAIT_QUANTITY") {
         const digitMatch = userText.match(/\d+/);
         if (!digitMatch) {
@@ -900,7 +897,6 @@ app.post("/webhook", async (req, res) => {
         }
       }
 
-      // ✅ Si quiere comprar -> pedir cantidad
       if (wantsToBuy && session.state !== "AWAIT_LOCATION") {
         session.state = "AWAIT_QUANTITY";
         await sendWhatsAppText(
@@ -911,7 +907,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // Si estamos esperando cantidad
       if (session.state === "AWAIT_QUANTITY") {
         let quantity = null;
         const digitMatch = userText.match(/\d+/);
@@ -938,14 +933,12 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // Q&A normal con IA
       const aiReply = await callOpenAI(session, currentProduct, userText);
       await sendWhatsAppText(userPhone, aiReply);
 
       session.history.push({ user: userText, assistant: aiReply });
       if (session.history.length > 6) session.history.shift();
 
-      // Enviar imagen una vez
       if (!session.sentImage && currentProduct.image) {
         await sendWhatsAppImage(
           userPhone,
@@ -960,18 +953,12 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // =============================
-    // 1) TEXTO
-    // =============================
     if (msgType === "text") {
       const userText = msg.text?.body?.trim() || "";
       await handleText(userText);
       return res.sendStatus(200);
     }
 
-    // =============================
-    // 2) AUDIO
-    // =============================
     if (msgType === "audio") {
       const mediaId = msg.audio?.id;
 
@@ -1030,9 +1017,6 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // =============================
-    // 3) LOCATION
-    // =============================
     if (msgType === "location") {
       const loc = msg.location;
       if (!loc) return res.sendStatus(200);
