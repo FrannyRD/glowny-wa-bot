@@ -21,6 +21,12 @@ const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_TOKEN =
   process.env.UPSTASH_REST_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
 
+// ✅ CHATWOOT (Opción 2 - Inbox)
+const CHATWOOT_BASE_URL = process.env.CHATWOOT_BASE_URL;
+const CHATWOOT_ACCOUNT_ID = process.env.CHATWOOT_ACCOUNT_ID;
+const CHATWOOT_INBOX_ID = process.env.CHATWOOT_INBOX_ID;
+const CHATWOOT_API_TOKEN = process.env.CHATWOOT_API_TOKEN;
+
 // =============================
 // Helpers
 // =============================
@@ -320,6 +326,172 @@ async function sendWhatsAppImage(to, imageUrl, caption = "") {
 }
 
 // =============================
+// ✅ CHATWOOT (Opción 2 - Inbox)
+// Sin dañar tu lógica: solo replica mensajes para que los veas.
+// =============================
+function chatwootEnabled() {
+  return (
+    CHATWOOT_BASE_URL &&
+    CHATWOOT_ACCOUNT_ID &&
+    CHATWOOT_INBOX_ID &&
+    CHATWOOT_API_TOKEN
+  );
+}
+
+function chatwootHeaders() {
+  return { api_access_token: CHATWOOT_API_TOKEN };
+}
+
+// Crear/obtener contacto
+async function cwGetOrCreateContact({ phone, name }) {
+  if (!chatwootEnabled()) return null;
+
+  const cleanPhone = onlyDigits(phone);
+
+  try {
+    // Buscar contacto
+    const searchRes = await axios.get(
+      `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts/search`,
+      {
+        params: { q: cleanPhone },
+        headers: chatwootHeaders(),
+      }
+    );
+
+    const found = searchRes.data?.payload?.[0];
+    if (found?.id) return found.id;
+  } catch (_) {
+    // Ignorar
+  }
+
+  try {
+    // Crear contacto
+    const createRes = await axios.post(
+      `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts`,
+      {
+        inbox_id: Number(CHATWOOT_INBOX_ID),
+        name: name || cleanPhone,
+        phone_number: cleanPhone,
+      },
+      { headers: chatwootHeaders() }
+    );
+
+    return createRes.data?.payload?.contact?.id || null;
+  } catch (err) {
+    // Si ya existe, intentar buscar otra vez
+    try {
+      const searchRes2 = await axios.get(
+        `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts/search`,
+        {
+          params: { q: cleanPhone },
+          headers: chatwootHeaders(),
+        }
+      );
+
+      const found2 = searchRes2.data?.payload?.[0];
+      if (found2?.id) return found2.id;
+    } catch (_) {}
+
+    console.error("❌ Chatwoot contacto:", err?.response?.data || err.message);
+    return null;
+  }
+}
+
+// Crear conversación (y guardarla en sesión para no duplicar)
+async function cwGetOrCreateConversation({ session, phone, contactId }) {
+  if (!chatwootEnabled()) return null;
+
+  if (session?.cw_conversation_id) return session.cw_conversation_id;
+
+  try {
+    const convRes = await axios.post(
+      `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/conversations`,
+      {
+        source_id: onlyDigits(phone), // identificador fijo para el cliente
+        inbox_id: Number(CHATWOOT_INBOX_ID),
+        contact_id: contactId,
+      },
+      { headers: chatwootHeaders() }
+    );
+
+    const conversationId = convRes.data?.id || null;
+    if (conversationId) session.cw_conversation_id = conversationId;
+    return conversationId;
+  } catch (err) {
+    console.error("❌ Chatwoot conversación:", err?.response?.data || err.message);
+    return null;
+  }
+}
+
+// Enviar mensaje entrante a Chatwoot (para que lo veas)
+async function sendToChatwoot({ session, from, name, message }) {
+  if (!chatwootEnabled()) return;
+
+  try {
+    const contactId = await cwGetOrCreateContact({
+      phone: from,
+      name: name || from,
+    });
+
+    if (!contactId) return;
+
+    const conversationId = await cwGetOrCreateConversation({
+      session,
+      phone: from,
+      contactId,
+    });
+
+    if (!conversationId) return;
+
+    await axios.post(
+      `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/conversations/${conversationId}/messages`,
+      {
+        content: message,
+        message_type: "incoming",
+      },
+      { headers: chatwootHeaders() }
+    );
+  } catch (err) {
+    console.error("❌ Chatwoot mensaje:", err?.response?.data || err.message);
+  }
+}
+
+// ✅ Webhook para recibir respuestas del agente (Chatwoot → WhatsApp)
+// Cuando respondas manual, el bot se calla 30 min para esa clienta.
+app.post("/chatwoot/webhook", async (req, res) => {
+  try {
+    const event = req.body;
+
+    // Solo mensajes salientes del agente
+    if (event?.message_type !== "outgoing") return res.sendStatus(200);
+
+    const content = event?.content;
+    const phone = event?.conversation?.meta?.sender?.phone_number;
+
+    if (!phone || !content) return res.sendStatus(200);
+
+    const userPhone = onlyDigits(phone);
+
+    let session = (await getSession(userPhone)) || {};
+    if (!session.history) session.history = [];
+    if (!session.order) session.order = {};
+    if (!session.state) session.state = "INIT";
+    if (!session.listCandidates) session.listCandidates = null;
+
+    // ✅ Modo humano por 30 minutos
+    session.human_until = Date.now() + 30 * 60 * 1000;
+
+    await setSession(userPhone, session);
+    await sendWhatsAppText(userPhone, content);
+
+    return res.sendStatus(200);
+  } catch (e) {
+    console.error("❌ Error /chatwoot/webhook:", e?.response?.data || e.message);
+    return res.sendStatus(200);
+  }
+});
+
+// =============================
 // OPENAI - Chat
 // =============================
 async function callOpenAI(session, product, userMessage) {
@@ -490,11 +662,30 @@ app.post("/webhook", async (req, res) => {
     if (!session.state) session.state = "INIT";
     if (!session.listCandidates) session.listCandidates = null;
 
+    // ✅ Si el modo humano expiró, lo quitamos
+    if (session.human_until && Date.now() > session.human_until) {
+      session.human_until = null;
+    }
+
     // =============================
     // FUNCIÓN PRINCIPAL DE TEXTO
     // =============================
     async function handleText(userText) {
       const lowText = normalizeText(userText);
+
+      // ✅ Enviar SIEMPRE a Chatwoot para que puedas ver conversaciones
+      await sendToChatwoot({
+        session,
+        from: userPhone,
+        name: customerName || userPhone,
+        message: userText,
+      });
+
+      // ✅ Si hay humano activo, el bot NO responde (solo lo ves en Chatwoot)
+      if (session.human_until && Date.now() < session.human_until) {
+        await setSession(userPhone, session);
+        return;
+      }
 
       // ✅ si dice "otro producto" en cualquier momento, resetea a catálogo
       const wantsOther =
@@ -533,7 +724,10 @@ app.post("/webhook", async (req, res) => {
       }
 
       // ✅ si estamos esperando seleccionar producto de una lista
-      if (session.state === "AWAIT_PRODUCT_SELECTION" && session.listCandidates) {
+      if (
+        session.state === "AWAIT_PRODUCT_SELECTION" &&
+        session.listCandidates
+      ) {
         const digit = userText.match(/\d+/);
         if (digit) {
           const idx = parseInt(digit[0], 10) - 1;
@@ -725,10 +919,22 @@ app.post("/webhook", async (req, res) => {
       const mediaId = msg.audio?.id;
 
       if (!mediaId) {
-        await sendWhatsAppText(
-          userPhone,
-          "Recibido 😊✨\nNo pude escuchar bien el audio. ¿Me lo escribes por favor? 💗"
-        );
+        const fallback = "Recibido 😊✨\nNo pude escuchar bien el audio. ¿Me lo escribes por favor? 💗";
+
+        await sendToChatwoot({
+          session,
+          from: userPhone,
+          name: customerName || userPhone,
+          message: "🎤 Nota de voz recibida (no pude leer el mediaId).",
+        });
+
+        // Si hay humano activo, no responder
+        if (session.human_until && Date.now() < session.human_until) {
+          await setSession(userPhone, session);
+          return res.sendStatus(200);
+        }
+
+        await sendWhatsAppText(userPhone, fallback);
         await setSession(userPhone, session);
         return res.sendStatus(200);
       }
@@ -736,13 +942,33 @@ app.post("/webhook", async (req, res) => {
       const transcript = await transcribeWhatsAppAudio(mediaId);
 
       if (!transcript) {
-        await sendWhatsAppText(
-          userPhone,
-          "Recibido 😊✨\nNo pude entender el audio. ¿Me lo escribes por favor? 💗"
-        );
+        const fallback = "Recibido 😊✨\nNo pude entender el audio. ¿Me lo escribes por favor? 💗";
+
+        await sendToChatwoot({
+          session,
+          from: userPhone,
+          name: customerName || userPhone,
+          message: "🎤 Nota de voz recibida (no se pudo transcribir).",
+        });
+
+        // Si hay humano activo, no responder
+        if (session.human_until && Date.now() < session.human_until) {
+          await setSession(userPhone, session);
+          return res.sendStatus(200);
+        }
+
+        await sendWhatsAppText(userPhone, fallback);
         await setSession(userPhone, session);
         return res.sendStatus(200);
       }
+
+      // ✅ mandar transcripción a Chatwoot para que tú la veas
+      await sendToChatwoot({
+        session,
+        from: userPhone,
+        name: customerName || userPhone,
+        message: `🎤 Nota de voz transcrita: ${transcript}`,
+      });
 
       // ✅ ahora procesa el texto transcrito como si lo hubiera escrito
       await handleText(transcript);
@@ -755,6 +981,24 @@ app.post("/webhook", async (req, res) => {
     if (msgType === "location") {
       const loc = msg.location;
       if (!loc) return res.sendStatus(200);
+
+      // ✅ Enviar a Chatwoot también
+      const mapPreview =
+        loc.latitude && loc.longitude
+          ? `📍 Ubicación enviada: https://maps.google.com/?q=${loc.latitude},${loc.longitude}`
+          : "📍 Ubicación enviada";
+      await sendToChatwoot({
+        session,
+        from: userPhone,
+        name: customerName || userPhone,
+        message: mapPreview,
+      });
+
+      // ✅ Si hay humano activo, no responder
+      if (session.human_until && Date.now() < session.human_until) {
+        await setSession(userPhone, session);
+        return res.sendStatus(200);
+      }
 
       if (session.state === "AWAIT_LOCATION") {
         session.order.location = {
