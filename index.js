@@ -40,10 +40,9 @@ function toE164(phone) {
   if (!d) return null;
 
   // RD usa +1 (NANP)
-  if (d.length === 10) return `+1${d}`; // 809XXXXXXX -> +1809XXXXXXX
-  if (d.length === 11 && d.startsWith("1")) return `+${d}`; // 1809XXXXXXX -> +1809XXXXXXX
+  if (d.length === 10) return `+1${d}`;
+  if (d.length === 11 && d.startsWith("1")) return `+${d}`;
 
-  // fallback
   return `+${d}`;
 }
 
@@ -51,15 +50,13 @@ function toE164(phone) {
 function toWARecipient(phone) {
   const e164 = toE164(phone);
   if (!e164) return null;
-  return onlyDigits(e164); // "+1809..." -> "1809..."
+  return onlyDigits(e164);
 }
 
-// ✅ Detecta si el mensaje es SOLO un número ("1", "2", "3")
 function isNumericOnly(text) {
   return /^[0-9]+$/.test(String(text || "").trim());
 }
 
-// ✅ Detecta saludo puro (para NO arrastrar producto viejo)
 function normalizeText(text) {
   let normalized = (text || "").toLowerCase();
   normalized = normalized.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -91,7 +88,6 @@ function isGreetingOnly(text) {
   return short && isGreeting;
 }
 
-// ✅ Confirmaciones típicas para evitar que se dispare búsqueda/lista
 const AFFIRMATIONS = new Set([
   "si",
   "sí",
@@ -105,7 +101,6 @@ const AFFIRMATIONS = new Set([
   "confirmar",
 ]);
 
-// Stopwords
 const SPANISH_STOPWORDS = new Set([
   "de",
   "la",
@@ -155,7 +150,6 @@ const BRAND_WORDS = new Set(["deliplus", "nivea", "sisbela", "florena"]);
 // =============================
 const catalog = require("./catalog.json");
 
-// Index del catálogo (más fuerte)
 const productIndex = catalog.map((prod) => {
   const nameNorm = normalizeText(prod.name);
   const tokens = nameNorm
@@ -174,7 +168,6 @@ const productIndex = catalog.map((prod) => {
   };
 });
 
-// ✅ Buscar 1 mejor producto
 function findProductForMessage(message) {
   const msgNorm = normalizeText(message);
   if (!msgNorm) return null;
@@ -193,7 +186,6 @@ function findProductForMessage(message) {
       item.keywords.has(w)
     ).length;
 
-    // ✅ bonus si el texto contiene parte del nombre
     const partialBonus = item.nameNorm.includes(msgNorm) ? 2 : 0;
     const score = commonWordsCount + partialBonus;
 
@@ -207,7 +199,6 @@ function findProductForMessage(message) {
   return bestMatch;
 }
 
-// ✅ Buscar MUCHOS productos por palabra
 function searchProductsByKeyword(message) {
   const msgNorm = normalizeText(message);
   const tokens = msgNorm
@@ -246,7 +237,6 @@ function searchProductsByKeyword(message) {
   return unique;
 }
 
-// ✅ Detecta si el usuario está pidiendo lista
 function isListRequest(userText) {
   const t = normalizeText(userText);
   const listTriggers = [
@@ -267,13 +257,11 @@ function isListRequest(userText) {
     "tienes de",
   ];
 
-  // ⚠️ NO confundir con “cómo se usa”
   if (t.includes("como se usa") || t.includes("cómo se usa")) return false;
 
   return listTriggers.some((x) => t.includes(x));
 }
 
-// ✅ Formatea lista de productos
 function formatProductList(matches, limit = 8) {
   const sliced = matches.slice(0, limit);
   const lines = sliced.map((m, idx) => {
@@ -334,7 +322,7 @@ async function setSession(userId, sessionData) {
 }
 
 // =============================
-// WHATSAPP CLOUD API (FIX)
+// WHATSAPP CLOUD API
 // =============================
 async function waSend(payload) {
   if (!WA_TOKEN || !PHONE_NUMBER_ID) {
@@ -347,10 +335,7 @@ async function waSend(payload) {
   try {
     await axios.post(
       url,
-      {
-        messaging_product: "whatsapp",
-        ...payload,
-      },
+      { messaging_product: "whatsapp", ...payload },
       {
         headers: {
           Authorization: `Bearer ${WA_TOKEN}`,
@@ -407,7 +392,6 @@ function chatwootHeaders() {
   };
 }
 
-// ✅ Crear/obtener contacto (FIX E164 aquí)
 async function cwGetOrCreateContact({ phone, name }) {
   if (!chatwootEnabled()) return null;
 
@@ -415,7 +399,6 @@ async function cwGetOrCreateContact({ phone, name }) {
   const e164Phone = toE164(cleanPhone);
   if (!cleanPhone || !e164Phone) return null;
 
-  // 1) Buscar contacto
   try {
     const searchRes = await axios.get(
       `${cwBase()}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts/search`,
@@ -429,7 +412,6 @@ async function cwGetOrCreateContact({ phone, name }) {
     if (found?.id) return found.id;
   } catch (_) {}
 
-  // 2) Crear contacto
   try {
     const createRes = await axios.post(
       `${cwBase()}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts`,
@@ -468,7 +450,6 @@ async function cwGetOrCreateContact({ phone, name }) {
   return null;
 }
 
-// ✅ Crear conversación y guardarla en sesión
 async function cwGetOrCreateConversation({ session, phone, contactId }) {
   if (!chatwootEnabled()) return null;
 
@@ -506,7 +487,6 @@ async function cwGetOrCreateConversation({ session, phone, contactId }) {
   }
 }
 
-// ✅ Enviar mensaje entrante a Chatwoot (para verlo)
 async function sendToChatwoot({ session, from, name, message }) {
   if (!chatwootEnabled()) return;
 
@@ -540,7 +520,8 @@ async function sendToChatwoot({ session, from, name, message }) {
   }
 }
 
-// ✅ NUEVO: Enviar mensaje del BOT a Chatwoot (para verlo en la conversación)
+// ✅ FIX DEFINITIVO:
+// Log del BOT como NOTA PRIVADA en Chatwoot (se ve ahí, pero NO se reenvía a WhatsApp)
 async function sendBotToChatwoot({ session, from, name, message }) {
   if (!chatwootEnabled()) return;
 
@@ -565,7 +546,7 @@ async function sendBotToChatwoot({ session, from, name, message }) {
       {
         content: message,
         message_type: "outgoing",
-        private: false,
+        private: true, // ✅ CLAVE: NO SALDRÁ A WHATSAPP DESDE WEBHOOK
       },
       { headers: chatwootHeaders() }
     );
@@ -575,7 +556,6 @@ async function sendBotToChatwoot({ session, from, name, message }) {
 }
 
 // ✅ Webhook para recibir respuestas del agente (Chatwoot → WhatsApp)
-// Cuando respondas manual, el bot se calla 30 min para esa clienta.
 app.post("/chatwoot/webhook", async (req, res) => {
   try {
     const event = req.body;
@@ -584,6 +564,9 @@ app.post("/chatwoot/webhook", async (req, res) => {
     const isOutgoing = mt === "outgoing" || mt === 1;
 
     if (!isOutgoing) return res.sendStatus(200);
+
+    // ✅ FIX: Ignorar PRIVATE NOTES (incluye logs del bot)
+    if (event?.private === true) return res.sendStatus(200);
 
     const content = event?.content?.trim();
     if (!content) return res.sendStatus(200);
@@ -605,6 +588,7 @@ app.post("/chatwoot/webhook", async (req, res) => {
     if (!session.state) session.state = "INIT";
     if (!session.listCandidates) session.listCandidates = null;
 
+    // ✅ cuando un humano responde: pausar bot 30 min
     session.human_until = Date.now() + 30 * 60 * 1000;
 
     await setSession(userPhone, session);
@@ -775,7 +759,7 @@ app.post("/webhook", async (req, res) => {
     const msg = messages[0];
     const userPhone = msg.from;
     const msgType = msg.type;
-    const msgId = msg.id; // ✅ para dedupe
+    const msgId = msg.id;
 
     const customerName = value?.contacts?.[0]?.profile?.name || "";
 
@@ -785,27 +769,26 @@ app.post("/webhook", async (req, res) => {
     if (!session.state) session.state = "INIT";
     if (!session.listCandidates) session.listCandidates = null;
 
-    // ✅ DEDUPE: si Meta reintenta el mismo mensaje, no duplicamos respuesta
+    // ✅ DEDUPE por msgId
     if (msgId && session.last_wa_msg_id === msgId) {
       return res.sendStatus(200);
     }
-    if (msgId) {
-      session.last_wa_msg_id = msgId;
-    }
+    if (msgId) session.last_wa_msg_id = msgId;
 
-    // ✅ Si el modo humano expiró, lo quitamos
     if (session.human_until && Date.now() > session.human_until) {
       session.human_until = null;
     }
 
-    // ✅ helper para responder y también escribir en Chatwoot (BOT visible)
+    // ✅ helper de respuesta
     async function botReply(text) {
       await sendWhatsAppText(userPhone, text);
+
+      // ✅ NOTA PRIVADA para ver el texto del bot en Chatwoot (SIN duplicar en WhatsApp)
       await sendBotToChatwoot({
         session,
         from: userPhone,
         name: customerName || userPhone,
-        message: `🤖 Bot: ${text}`,
+        message: `BOT: ${text}`,
       });
     }
 
@@ -815,7 +798,6 @@ app.post("/webhook", async (req, res) => {
     async function handleText(userText) {
       const lowText = normalizeText(userText);
 
-      // ✅ Enviar SIEMPRE a Chatwoot para que puedas ver conversaciones (cliente)
       await sendToChatwoot({
         session,
         from: userPhone,
@@ -823,18 +805,30 @@ app.post("/webhook", async (req, res) => {
         message: userText,
       });
 
-      // ✅ Si hay humano activo, el bot NO responde
       if (session.human_until && Date.now() < session.human_until) {
         await setSession(userPhone, session);
         return;
       }
 
-      // ✅ Upgrade: si saludó y tiene carrito en progreso => confirmación amable
+      // ✅ FIX ANTI-DUPLICADO DE SALUDO (NO DAÑA NADA)
       const greetingOnly = isGreetingOnly(userText);
+      if (greetingOnly) {
+        const now = Date.now();
+        const last = session.last_greeting_reply_ts || 0;
+
+        // si ya respondimos saludo en los últimos 10s, ignorar
+        if (now - last < 10000) {
+          await setSession(userPhone, session);
+          return;
+        }
+      }
+
       const hasCartInProgress =
         session.state === "AWAIT_LOCATION" && session.order?.items?.length;
 
       if (greetingOnly && hasCartInProgress) {
+        session.last_greeting_reply_ts = Date.now();
+
         const count = session.order.items.length;
         await botReply(
           `¡Hola! 😊✨\nVi que enviaste un carrito con *${count}* artículo(s) 🛒💗\n¿Quieres confirmarlo o buscas otro producto?`
@@ -843,12 +837,13 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // ✅ FIX: si solo saludó, NO usar producto guardado en session
       const hasOrderInProgress =
         session.state === "AWAIT_LOCATION" &&
         (session.order?.items?.length || session.order?.quantity);
 
       if (greetingOnly && !hasOrderInProgress) {
+        session.last_greeting_reply_ts = Date.now();
+
         session.state = "INIT";
         session.product = null;
         session.sentImage = false;
@@ -863,7 +858,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // ✅ si dice "otro producto" en cualquier momento, resetea a catálogo
       const wantsOther =
         lowText.includes("otro producto") ||
         lowText === "otro" ||
@@ -885,7 +879,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // ✅✅✅ FIX #1: Si estamos esperando seleccionar producto, procesar ANTES de lista/búsqueda
       if (
         session.state === "AWAIT_PRODUCT_SELECTION" &&
         session.listCandidates
@@ -927,7 +920,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // ✅ Detectar intención de compra (AHORA antes de lista/búsqueda)
       const wantsToBuy =
         lowText.includes("quiero") ||
         lowText.includes("lo quiero") ||
@@ -939,15 +931,12 @@ app.post("/webhook", async (req, res) => {
         lowText === "si" ||
         lowText === "sí";
 
-      // ✅✅✅ FIX #2: SOLO activar lista por corto si NO es número
-      // y NO es "sí/ok/dale" y NO es intención de compra
       const allowShortSearch =
         !isNumericOnly(userText) &&
         !AFFIRMATIONS.has(lowText) &&
         !wantsToBuy &&
         (session.state === "INIT" || session.state === "Q&A");
 
-      // ✅ si el usuario pidió lista
       if (
         isListRequest(userText) ||
         (allowShortSearch && lowText.split(" ").length <= 2)
@@ -963,16 +952,14 @@ app.post("/webhook", async (req, res) => {
         }
       }
 
-      // ✅ Buscar producto SIEMPRE (para evitar que se quede pegado)
       let currentProduct = session.product || null;
       const found = findProductForMessage(userText);
       if (found) {
         currentProduct = found.data;
         session.product = currentProduct;
-        session.sentImage = false; // ✅ si cambió producto, permitir nueva imagen
+        session.sentImage = false;
       }
 
-      // ✅ Si no se identifica producto
       if (!currentProduct) {
         const matches = searchProductsByKeyword(userText);
         if (matches.length >= 2) {
@@ -991,26 +978,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // ✅ Si estaba esperando cantidad y manda nombre de otro producto -> cambiar producto
-      if (session.state === "AWAIT_QUANTITY") {
-        const digitMatch = userText.match(/\d+/);
-        if (!digitMatch) {
-          const maybeOther = findProductForMessage(userText);
-          if (maybeOther && maybeOther.data?.id !== currentProduct.id) {
-            session.product = maybeOther.data;
-            currentProduct = maybeOther.data;
-            session.sentImage = false;
-
-            await botReply(
-              `Perfecto 😊🛒\n¿Cuántas unidades de *${maybeOther.data.name}* deseas?`
-            );
-            await setSession(userPhone, session);
-            return;
-          }
-        }
-      }
-
-      // ✅ Si quiere comprar -> pedir cantidad
       if (wantsToBuy && session.state !== "AWAIT_LOCATION") {
         session.state = "AWAIT_QUANTITY";
         await botReply(
@@ -1020,7 +987,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // ✅ Si estamos esperando cantidad
       if (session.state === "AWAIT_QUANTITY") {
         let quantity = null;
         const digitMatch = userText.match(/\d+/);
@@ -1045,22 +1011,14 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // ✅ Q&A normal con IA
       const aiReply = await callOpenAI(session, currentProduct, userText);
       await botReply(aiReply);
 
       session.history.push({ user: userText, assistant: aiReply });
       if (session.history.length > 6) session.history.shift();
 
-      // ✅ Enviar imagen una vez por producto
       if (!session.sentImage && currentProduct.image) {
         await sendWhatsAppImage(userPhone, currentProduct.image, currentProduct.name);
-        await sendBotToChatwoot({
-          session,
-          from: userPhone,
-          name: customerName || userPhone,
-          message: `🤖 Bot envió imagen: ${currentProduct.name}`,
-        });
         session.sentImage = true;
       }
 
@@ -1070,13 +1028,12 @@ app.post("/webhook", async (req, res) => {
     }
 
     // =============================
-    // ✅ 0) META CATALOG - ORDER (UPGRADE)
+    // ✅ META CATALOG - ORDER
     // =============================
     if (msgType === "order") {
       const order = msg.order;
       const items = order?.product_items || [];
 
-      // enviar a chatwoot lo que llegó
       await sendToChatwoot({
         session,
         from: userPhone,
@@ -1098,14 +1055,12 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // armar items desde retailer_id (normalmente es el ID del producto en el catálogo de meta)
       const parsedItems = [];
 
       for (const it of items) {
         const retailerId = String(it.product_retailer_id || "").trim();
         const qty = Number(it.quantity || 1);
 
-        // intentamos matchear en tu catalog.json
         const foundById =
           productIndex.find((p) => String(p.data.id) === retailerId) ||
           productIndex.find((p) => String(p.data.meta_id) === retailerId) ||
@@ -1119,7 +1074,6 @@ app.post("/webhook", async (req, res) => {
             quantity: qty,
           });
         } else {
-          // fallback si no lo encuentra
           parsedItems.push({
             id: retailerId || "unknown",
             name: `Producto ${retailerId || ""}`.trim(),
@@ -1139,7 +1093,6 @@ app.post("/webhook", async (req, res) => {
       session.sentImage = false;
       session.listCandidates = null;
 
-      // mensaje resumen
       const lines = parsedItems.map((p, i) => {
         const priceText = p.price ? ` — RD$${p.price}` : "";
         return `${i + 1}) ${p.name} x${p.quantity}${priceText}`;
@@ -1156,7 +1109,7 @@ app.post("/webhook", async (req, res) => {
         session,
         from: userPhone,
         name: customerName || userPhone,
-        message: `🤖 Bot: Recibí tu carrito y pedí ubicación.`,
+        message: `BOT: Recibí carrito (Meta) y pedí ubicación.`,
       });
 
       await setSession(userPhone, session);
@@ -1199,7 +1152,7 @@ app.post("/webhook", async (req, res) => {
           session,
           from: userPhone,
           name: customerName || userPhone,
-          message: `🤖 Bot: ${fallback}`,
+          message: `BOT: ${fallback}`,
         });
 
         await setSession(userPhone, session);
@@ -1229,7 +1182,7 @@ app.post("/webhook", async (req, res) => {
           session,
           from: userPhone,
           name: customerName || userPhone,
-          message: `🤖 Bot: ${fallback}`,
+          message: `BOT: ${fallback}`,
         });
 
         await setSession(userPhone, session);
@@ -1289,10 +1242,9 @@ app.post("/webhook", async (req, res) => {
           from: userPhone,
           name: customerName || userPhone,
           message:
-            "🤖 Bot: Perfecto 🤩 uno de nuestros representantes te estará contactando con los detalles de envíos y pagos.",
+            "BOT: Perfecto 🤩 representante contactará con envíos y pagos.",
         });
 
-        // ✅ Admin notification FIX (con código país siempre)
         const ADMIN_PHONE = toWARecipient(ADMIN_PHONE_RAW);
         if (ADMIN_PHONE) {
           const order = session.order || {};
@@ -1336,7 +1288,6 @@ ${locationInfo}`;
           await sendWhatsAppText(ADMIN_PHONE, adminMsg);
         }
 
-        // reset
         session.state = "INIT";
         session.order = {};
         session.history = [];
@@ -1357,7 +1308,7 @@ ${locationInfo}`;
         session,
         from: userPhone,
         name: customerName || userPhone,
-        message: "🤖 Bot: Recibí tu ubicación 😊📍 ¿Te ayudo a pedir algún producto? 💗",
+        message: "BOT: Recibí ubicación y ofrecí ayuda.",
       });
 
       await setSession(userPhone, session);
