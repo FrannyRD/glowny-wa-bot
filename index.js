@@ -35,6 +35,9 @@ const MANUAL_MODE = String(process.env.MANUAL_MODE || "")
 // ✅ LINK REAL DEL CATÁLOGO (CTA URL)
 const WHATSAPP_CATALOG_URL = "https://wa.me/c/18495828578";
 
+// ✅ COOLDOWN BIENVENIDA: 24 horas
+const WELCOME_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
 // =============================
 // Helpers
 // =============================
@@ -69,6 +72,7 @@ function normalizeText(text) {
   return normalized;
 }
 
+// (Se mantiene por si lo usas luego)
 function isGreetingOnly(text) {
   const t = normalizeText(text);
 
@@ -488,7 +492,7 @@ async function processInboundWhatsApp(body) {
     }
 
     // =============================
-    // ✅ 1) TEXTO (CON CUALQUIER PALABRA -> manda saludo con botón catálogo)
+    // ✅ 1) TEXTO (BIENVENIDA SOLO 1 VEZ CADA 24 HORAS)
     // =============================
     if (msgType === "text") {
       const userText = msg.text?.body?.trim() || "";
@@ -506,25 +510,32 @@ async function processInboundWhatsApp(body) {
         return;
       }
 
-      // ✅ Si el cliente ya tiene un carrito y estamos esperando ubicación,
-      // NO mandamos bienvenida para no confundir.
-      // Aquí solo recordamos que envíe la ubicación.
-      if (session.state === "AWAIT_LOCATION") {
-        await sendWhatsAppText(
-          userPhone,
-          "Perfecto 😊📍\nPara finalizar tu pedido, envíame tu ubicación (clip 📎 > Ubicación > Enviar) 💗"
-        );
+      // ✅ IMPORTANTE:
+      // Ya NO mandamos recordatorio de ubicación cuando el cliente escribe texto.
+      // El pedido de ubicación se envía SOLO 1 vez cuando llega el CARRITO (order).
+      //
+      // (Esto es lo que te estaba duplicando: "Perfecto 📍 envíame ubicación" cada vez que escribían.)
+      //
+      // if (session.state === "AWAIT_LOCATION") {
+      //   await sendWhatsAppText(
+      //     userPhone,
+      //     "Perfecto 😊📍\nPara finalizar tu pedido, envíame tu ubicación (clip 📎 > Ubicación > Enviar) 💗"
+      //   );
+      //   await setSession(userPhone, session);
+      //   return;
+      // }
+
+      // ✅ BIENVENIDA SOLO 1 VEZ CADA 24 HORAS
+      const now = Date.now();
+      const lastWelcome = session.last_welcome_ts || 0;
+
+      if (now - lastWelcome < WELCOME_COOLDOWN_MS) {
+        // No envía nada (para no molestar)
         await setSession(userPhone, session);
         return;
       }
 
-      // ✅ ANTI-DUPLICADO: no repetir bienvenida cada 2 segundos
-      const last = session.last_welcome_ts || 0;
-      if (Date.now() - last < 15000) {
-        await setSession(userPhone, session);
-        return;
-      }
-      session.last_welcome_ts = Date.now();
+      session.last_welcome_ts = now;
 
       const greetingName = customerName ? ` ${customerName}` : "";
       const welcomeText =
@@ -534,7 +545,6 @@ async function processInboundWhatsApp(body) {
         `✅ Selecciona tus productos y cuando termines tu carrito,\n` +
         `envíame tu *ubicación* 📍 para finalizar 💗`;
 
-      // ✅ botón real que abre el catálogo (CTA URL)
       await sendWhatsAppCtaUrl(
         userPhone,
         welcomeText,
@@ -546,7 +556,7 @@ async function processInboundWhatsApp(body) {
         session,
         from: userPhone,
         name: customerName || userPhone,
-        message: "BOT: Bienvenida enviada (cualquier texto) con CTA URL.",
+        message: "BOT: Bienvenida enviada (1 vez cada 24h) con CTA URL.",
       });
 
       await setSession(userPhone, session);
@@ -554,7 +564,8 @@ async function processInboundWhatsApp(body) {
     }
 
     // =============================
-    // ✅ 2) META CATALOG - ORDER (Recibir carrito + pedir ubicación)
+    // ✅ 2) META CATALOG - ORDER
+    // ✅ Pedir ubicación SOLO 1 VEZ justo al llegar el carrito
     // =============================
     if (msgType === "order") {
       const order = msg.order;
@@ -629,7 +640,7 @@ async function processInboundWhatsApp(body) {
         message: `✅ Pedido del catálogo:\n${lines.join("\n")}`,
       });
 
-      // ✅ pedir ubicación SOLO aquí
+      // ✅ Pedir ubicación SOLO AQUÍ (1 vez por carrito)
       await sendWhatsAppText(
         userPhone,
         `✅ Recibí tu carrito 😊🛒\n\n${lines.join(
@@ -641,7 +652,7 @@ async function processInboundWhatsApp(body) {
         session,
         from: userPhone,
         name: customerName || userPhone,
-        message: "BOT: Carrito recibido + pedí ubicación.",
+        message: "BOT: Carrito recibido + pedí ubicación (1 vez).",
       });
 
       await setSession(userPhone, session);
@@ -717,7 +728,7 @@ ${itemsInfo}
           await sendWhatsAppText(ADMIN_PHONE, adminMsg);
         }
 
-        // reset
+        // reset pedido
         session.state = "INIT";
         session.order = {};
 
