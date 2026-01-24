@@ -526,7 +526,7 @@ async function processInboundWhatsApp(body) {
         await sendWhatsAppCtaUrl(
           userPhone,
           welcomeText,
-          "🛍️ Ver catálogo",
+          "Ver catálogo",
           WHATSAPP_CATALOG_URL
         );
 
