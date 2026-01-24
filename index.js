@@ -861,8 +861,8 @@ app.post("/webhook", async (req, res) => {
         session.order = {};
 
         const greetingName = customerName ? ` ${customerName}` : "";
-        const botMsg = `¡Hola${greetingName}! 😊✨\nBienvenida a Glowny Essentials 💗\nCuéntame, ¿qué producto estás buscando hoy?`;
-
+        const botMsg = `¡Hola${greetingName}! 😊✨\nBienvenida a Glowny Essentials 💗\nCuéntame, ¿qué producto estás buscando hoy?🛒\nSi prefieres, puedes elegirlo y hacer tu pedido\nDirectamente desde nuestro catálogo de WhatsApp 🛍️✨`;
+        
         await botReply(botMsg);
         await setSession(userPhone, session);
         return;
