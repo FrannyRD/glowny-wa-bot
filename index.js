@@ -32,6 +32,9 @@ const MANUAL_MODE = String(process.env.MANUAL_MODE || "")
   .trim()
   .toLowerCase() === "true";
 
+// ✅ LINK REAL DEL CATÁLOGO (CTA URL)
+const WHATSAPP_CATALOG_URL = "https://wa.me/c/18495828578";
+
 // =============================
 // Helpers
 // =============================
@@ -56,10 +59,6 @@ function toWARecipient(phone) {
   const e164 = toE164(phone);
   if (!e164) return null;
   return onlyDigits(e164);
-}
-
-function isNumericOnly(text) {
-  return /^[0-9]+$/.test(String(text || "").trim());
 }
 
 function normalizeText(text) {
@@ -95,92 +94,18 @@ function isGreetingOnly(text) {
   return short && isGreeting;
 }
 
-const AFFIRMATIONS = new Set([
-  "si",
-  "sí",
-  "ok",
-  "okay",
-  "dale",
-  "claro",
-  "de una",
-  "perfecto",
-  "confirmo",
-  "confirmar",
-]);
-
-const SPANISH_STOPWORDS = new Set([
-  "de",
-  "la",
-  "y",
-  "con",
-  "para",
-  "del",
-  "en",
-  "el",
-  "al",
-  "por",
-  "una",
-  "un",
-  "unos",
-  "unas",
-  "lo",
-  "los",
-  "las",
-  "le",
-  "les",
-  "tu",
-  "su",
-  "sus",
-  "mi",
-  "mis",
-  "que",
-  "quiero",
-  "dime",
-  "todos",
-  "todas",
-  "cuales",
-  "cuáles",
-  "tienes",
-  "hay",
-  "me",
-  "muestrame",
-  "muéstrame",
-  "lista",
-  "producto",
-  "productos",
-]);
-
-const BRAND_WORDS = new Set(["deliplus", "nivea", "sisbela", "florena"]);
-
 // =============================
 // Cargar catálogo
-// =============================
+// (se mantiene, porque se usa para mapear carrito meta)
+ // =============================
 const catalog = require("./catalog.json");
 
 const productIndex = catalog.map((prod) => {
-  const nameNorm = normalizeText(prod.name);
-  const tokens = nameNorm
-    .split(" ")
-    .filter((w) => w && !SPANISH_STOPWORDS.has(w) && !BRAND_WORDS.has(w));
-
-  const keywords = new Set(tokens);
-
   return {
     id: prod.id,
-    name: prod.name,
-    nameNorm,
-    tokens,
-    keywords,
     data: prod,
   };
 });
-
-// ✅ Thumbnail para abrir catálogo dentro de WhatsApp (Meta lo exige)
-function getThumbnailRetailerId() {
-  // intentamos usar el primer producto válido del catálogo
-  const first = productIndex?.[0]?.data?.id;
-  return first ? String(first) : "1";
-}
 
 // =============================
 // UPSTASH (sesión)
@@ -263,51 +188,22 @@ async function sendWhatsAppText(to, text) {
   });
 }
 
-async function sendWhatsAppImage(to, imageUrl, caption = "") {
-  const recipient = toWARecipient(to) || onlyDigits(to);
-  await waSend({
-    to: recipient,
-    type: "image",
-    image: { link: imageUrl, caption },
-  });
-}
-
-// ✅ BOTÓN “VER CATÁLOGO” (sin link) -> abre catálogo dentro de WhatsApp
-async function sendWhatsAppCatalogOpen(to, bodyText) {
+// ✅ BOTÓN QUE ABRE LINK (CTA URL)
+async function sendWhatsAppCtaUrl(to, bodyText, buttonText, url) {
   const recipient = toWARecipient(to) || onlyDigits(to);
 
   await waSend({
     to: recipient,
     type: "interactive",
     interactive: {
-      type: "catalog_message",
+      type: "cta_url",
       body: { text: bodyText },
       action: {
-        name: "catalog_message",
+        name: "cta_url",
         parameters: {
-          thumbnail_product_retailer_id: getThumbnailRetailerId(),
+          display_text: buttonText,
+          url: url,
         },
-      },
-    },
-  });
-}
-
-// ✅ Botones reply (solo usamos VER_CATALOGO ahora)
-async function sendWhatsAppReplyButtons(to, bodyText, buttons = []) {
-  const recipient = toWARecipient(to) || onlyDigits(to);
-  const sliced = buttons.slice(0, 3);
-
-  await waSend({
-    to: recipient,
-    type: "interactive",
-    interactive: {
-      type: "button",
-      body: { text: bodyText },
-      action: {
-        buttons: sliced.map((b) => ({
-          type: "reply",
-          reply: { id: b.id, title: b.title },
-        })),
       },
     },
   });
@@ -431,7 +327,6 @@ async function cwGetOrCreateConversation({ session, phone, contactId }) {
   }
 }
 
-// ✅ INCOMING real
 async function sendToChatwoot({ session, from, name, message }) {
   if (!chatwootEnabled()) return;
 
@@ -465,7 +360,6 @@ async function sendToChatwoot({ session, from, name, message }) {
   }
 }
 
-// ✅ BOT LOG COMO NOTA PRIVADA
 async function sendBotToChatwoot({ session, from, name, message }) {
   if (!chatwootEnabled()) return;
 
@@ -499,7 +393,7 @@ async function sendBotToChatwoot({ session, from, name, message }) {
   }
 }
 
-// ✅ Webhook para recibir respuestas del agente (Chatwoot → WhatsApp)
+// ✅ Webhook Chatwoot -> WhatsApp (si tú respondes manual)
 app.post("/chatwoot/webhook", async (req, res) => {
   try {
     const event = req.body;
@@ -528,39 +422,20 @@ app.post("/chatwoot/webhook", async (req, res) => {
     const userPhone = onlyDigits(phone);
 
     let session = (await getSession(userPhone)) || {};
-    if (!session.history) session.history = [];
     if (!session.order) session.order = {};
     if (!session.state) session.state = "INIT";
-    if (!session.listCandidates) session.listCandidates = null;
 
-    // ✅ cuando un humano responde: pausar bot 30 min
+    // ✅ pausar bot 30 min cuando el humano responde
     session.human_until = Date.now() + 30 * 60 * 1000;
-
     await setSession(userPhone, session);
 
     await sendWhatsAppText(userPhone, content);
-
     return res.sendStatus(200);
   } catch (e) {
     console.error("❌ Error /chatwoot/webhook:", e?.response?.data || e.message);
     return res.sendStatus(200);
   }
 });
-
-/**
- * =============================
- * 🔥 OPENAI / BÚSQUEDA / AI
- * (NO se usa ahora porque el bot será solo bienvenida + carrito)
- * NO BORRAR: se deja comentado para futuras mejoras.
- * =============================
- */
-
-// async function callOpenAI(session, product, userMessage) { ... }
-// function findProductForMessage(message) { ... }
-// function searchProductsByKeyword(message) { ... }
-// function isListRequest(userText) { ... }
-// function formatProductList(matches, limit = 8) { ... }
-// async function transcribeWhatsAppAudio(mediaId) { ... }
 
 // =============================
 // WEBHOOK VERIFY
@@ -578,7 +453,7 @@ app.get("/webhook", (req, res) => {
 });
 
 // =============================
-// ✅ PROCESADOR PRINCIPAL (ACK rápido)
+// ✅ PROCESADOR PRINCIPAL
 // =============================
 async function processInboundWhatsApp(body) {
   try {
@@ -599,120 +474,21 @@ async function processInboundWhatsApp(body) {
     const customerName = value?.contacts?.[0]?.profile?.name || "";
 
     let session = (await getSession(userPhone)) || {};
-    if (!session.history) session.history = [];
     if (!session.order) session.order = {};
     if (!session.state) session.state = "INIT";
-    if (!session.listCandidates) session.listCandidates = null;
 
-    // ✅ DEDUPE fuerte por msgId
+    // ✅ DEDUPE por msgId
     if (msgId && session.last_wa_msg_id === msgId) return;
     if (msgId) session.last_wa_msg_id = msgId;
 
-    // ✅ DEDUPE extra por fingerprint 10s (evita duplicados por retry)
-    const now = Date.now();
-    const textForDedupe =
-      msgType === "text" ? (msg.text?.body || "").trim() : "";
-    if (textForDedupe) {
-      const fp = `${normalizeText(textForDedupe)}|${msgType}`;
-      if (
-        session.last_fp === fp &&
-        session.last_fp_ts &&
-        now - session.last_fp_ts < 10000
-      ) {
-        return;
-      }
-      session.last_fp = fp;
-      session.last_fp_ts = now;
-    }
-
-    if (session.human_until && Date.now() > session.human_until) {
-      session.human_until = null;
-    }
-
-    // ✅ helper de respuesta (solo si NO está en modo manual)
-    async function botReplyText(text) {
-      if (MANUAL_MODE) return;
-
-      await sendWhatsAppText(userPhone, text);
-
-      await sendBotToChatwoot({
-        session,
-        from: userPhone,
-        name: customerName || userPhone,
-        message: `BOT: ${text}`,
-      });
-    }
-
-    // ✅ Bienvenida con 1 botón (VER CATÁLOGO) - SIN botón ubicación
-    async function sendWelcome() {
-      if (MANUAL_MODE) return;
-
-      const greetingName = customerName ? ` ${customerName}` : "";
-      const welcomeText =
-        `¡Hola${greetingName}! 😊✨\n` +
-        `Bienvenida a Glowny Essentials 💗\n\n` +
-        `🛍️ Puedes hacer tu pedido fácil desde nuestro *Catálogo de WhatsApp*.\n` +
-        `✅ Selecciona tus productos y cuando termines tu carrito,\n` +
-        `envíame tu *ubicación* 📍 para finalizar 💗`;
-
-      // ✅ solo 1 botón: Ver catálogo (reply)
-      await sendWhatsAppReplyButtons(userPhone, welcomeText, [
-        { id: "VER_CATALOGO", title: "🛍️ Ver catálogo" },
-      ]);
-
-      await sendBotToChatwoot({
-        session,
-        from: userPhone,
-        name: customerName || userPhone,
-        message: `BOT: Bienvenida enviada (solo botón catálogo).`,
-      });
-    }
-
-    // =============================
-    // ✅ 0) BOTÓN PRESIONADO (reply)
-    // =============================
-    // Cuando el cliente toca "Ver catálogo", aquí NO mandamos link.
-    // Aquí enviamos un "catalog_message" para que WhatsApp lo abra.
-    if (msgType === "button") {
-      const payload = msg.button?.payload || "";
-      const text = msg.button?.text || "";
-
-      await sendToChatwoot({
-        session,
-        from: userPhone,
-        name: customerName || userPhone,
-        message: `🟦 Botón presionado: ${payload || text}`,
-      });
-
-      if (MANUAL_MODE) {
-        await setSession(userPhone, session);
-        return;
-      }
-
-      if (payload === "VER_CATALOGO") {
-        // ✅ abre catálogo dentro de WhatsApp (sin link)
-        await sendWhatsAppCatalogOpen(
-          userPhone,
-          "🛍️ Aquí tienes nuestro catálogo 😊💗"
-        );
-
-        await sendBotToChatwoot({
-          session,
-          from: userPhone,
-          name: customerName || userPhone,
-          message: `BOT: Abrí catálogo (catalog_message).`,
-        });
-
-        await setSession(userPhone, session);
-        return;
-      }
-
+    // ✅ si humano está atendiendo, bot pausa
+    if (session.human_until && Date.now() < session.human_until) {
       await setSession(userPhone, session);
       return;
     }
 
     // =============================
-    // ✅ 1) TEXTO
+    // ✅ 1) TEXTO (SOLO SALUDO -> bienvenida con botón que ABRE catálogo)
     // =============================
     if (msgType === "text") {
       const userText = msg.text?.body?.trim() || "";
@@ -724,13 +500,12 @@ async function processInboundWhatsApp(body) {
         message: userText,
       });
 
-      // ✅ si humano está atendiendo, bot pausa
-      if (session.human_until && Date.now() < session.human_until) {
+      // ✅ modo manual: no responder
+      if (MANUAL_MODE) {
         await setSession(userPhone, session);
         return;
       }
 
-      // ✅ solo responde con bienvenida si es saludo
       if (isGreetingOnly(userText)) {
         const last = session.last_greeting_reply_ts || 0;
         if (Date.now() - last < 15000) {
@@ -739,19 +514,40 @@ async function processInboundWhatsApp(body) {
         }
         session.last_greeting_reply_ts = Date.now();
 
-        await sendWelcome();
+        const greetingName = customerName ? ` ${customerName}` : "";
+        const welcomeText =
+          `¡Hola${greetingName}! 😊✨\n` +
+          `Bienvenida a Glowny Essentials 💗\n\n` +
+          `🛍️ Puedes hacer tu pedido fácil desde nuestro *Catálogo de WhatsApp*.\n` +
+          `✅ Selecciona tus productos y cuando termines tu carrito,\n` +
+          `envíame tu *ubicación* 📍 para finalizar 💗`;
+
+        // ✅ botón real que abre el catálogo
+        await sendWhatsAppCtaUrl(
+          userPhone,
+          welcomeText,
+          "🛍️ Ver catálogo",
+          WHATSAPP_CATALOG_URL
+        );
+
+        await sendBotToChatwoot({
+          session,
+          from: userPhone,
+          name: customerName || userPhone,
+          message: "BOT: Bienvenida enviada con CTA URL (abre catálogo).",
+        });
+
         await setSession(userPhone, session);
         return;
       }
 
-      // ✅ si NO es saludo, no hacemos nada automático (para evitar ruido)
-      // (Se queda en Chatwoot para manejar manual si quieres)
+      // Si no es saludo, no responde automático
       await setSession(userPhone, session);
       return;
     }
 
     // =============================
-    // ✅ 2) META CATALOG - ORDER (NO TOCAR)
+    // ✅ 2) META CATALOG - ORDER (Recibir carrito + pedir ubicación)
     // =============================
     if (msgType === "order") {
       const order = msg.order;
@@ -772,7 +568,7 @@ async function processInboundWhatsApp(body) {
       if (!items.length) {
         await sendWhatsAppText(
           userPhone,
-          "Recibí tu carrito 😊🛒\nPero no veo productos dentro. ¿Quieres intentarlo de nuevo desde el catálogo? 💗"
+          "Recibí tu carrito 😊🛒\nPero no veo productos dentro. ¿Puedes intentarlo de nuevo desde el catálogo? 💗"
         );
         await setSession(userPhone, session);
         return;
@@ -812,16 +608,13 @@ async function processInboundWhatsApp(body) {
       };
 
       session.state = "AWAIT_LOCATION";
-      session.product = null;
-      session.sentImage = false;
-      session.listCandidates = null;
 
       const lines = parsedItems.map((p, i) => {
         const priceText = p.price ? ` — RD$${p.price}` : "";
         return `${i + 1}) ${p.name} x${p.quantity}${priceText}`;
       });
 
-      // ✅ Mostrar en Chatwoot lo pedido (bien detallado)
+      // ✅ Mostrar en Chatwoot lo pedido
       await sendToChatwoot({
         session,
         from: userPhone,
@@ -829,7 +622,7 @@ async function processInboundWhatsApp(body) {
         message: `✅ Pedido del catálogo:\n${lines.join("\n")}`,
       });
 
-      // ✅ SOLO AQUÍ pedimos ubicación (como tú quieres)
+      // ✅ pedir ubicación SOLO aquí
       await sendWhatsAppText(
         userPhone,
         `✅ Recibí tu carrito 😊🛒\n\n${lines.join(
@@ -841,7 +634,7 @@ async function processInboundWhatsApp(body) {
         session,
         from: userPhone,
         name: customerName || userPhone,
-        message: `BOT: Recibí carrito (Meta) y pedí ubicación.`,
+        message: "BOT: Carrito recibido + pedí ubicación.",
       });
 
       await setSession(userPhone, session);
@@ -849,7 +642,7 @@ async function processInboundWhatsApp(body) {
     }
 
     // =============================
-    // ✅ 3) LOCATION
+    // ✅ 3) LOCATION (Finaliza pedido)
     // =============================
     if (msgType === "location") {
       const loc = msg.location;
@@ -885,47 +678,34 @@ async function processInboundWhatsApp(body) {
           "Perfecto 🤩 uno de nuestros representantes te estará contactando con los detalles de envíos y pagos."
         );
 
-        await sendBotToChatwoot({
-          session,
-          from: userPhone,
-          name: customerName || userPhone,
-          message:
-            "BOT: Perfecto 🤩 representante contactará con envíos y pagos.",
-        });
-
+        // Aviso admin
         const ADMIN_PHONE = toWARecipient(ADMIN_PHONE_RAW);
         if (ADMIN_PHONE) {
-          const order = session.order || {};
-          const items = order.items || [];
+          const items = session.order?.items || [];
 
-          let locationInfo = "";
-          if (order.location?.latitude && order.location?.longitude) {
-            const { latitude, longitude, address, name } = order.location;
-            const mapLink = `https://maps.google.com/?q=${latitude},${longitude}`;
-            locationInfo = `📍 Ubicación: ${name ? name + " - " : ""}${
-              address ? address + " - " : ""
-            }${mapLink}`;
-          }
+          const itemsInfo =
+            items.length > 0
+              ? "\n🛒 Carrito:\n" +
+                items
+                  .map(
+                    (p, i) =>
+                      `${i + 1}) ${p.name} x${p.quantity}${
+                        p.price ? ` — RD$${p.price}` : ""
+                      }`
+                  )
+                  .join("\n")
+              : "";
 
-          let itemsInfo = "";
-          if (items.length) {
-            itemsInfo =
-              "\n🛒 Carrito:\n" +
-              items
-                .map(
-                  (p, i) =>
-                    `${i + 1}) ${p.name} x${p.quantity}${
-                      p.price ? ` — RD$${p.price}` : ""
-                    }`
-                )
-                .join("\n");
-          }
+          const mapLink =
+            loc.latitude && loc.longitude
+              ? `https://maps.google.com/?q=${loc.latitude},${loc.longitude}`
+              : "";
 
           const adminMsg = `📦 NUEVO PEDIDO - Glowny Essentials
 Cliente: ${customerName || "Sin nombre"} (${userPhone})
 Fuente: Catálogo Meta
 ${itemsInfo}
-${locationInfo}`;
+📍 Ubicación: ${mapLink}`;
 
           await sendWhatsAppText(ADMIN_PHONE, adminMsg);
         }
@@ -933,10 +713,6 @@ ${locationInfo}`;
         // reset
         session.state = "INIT";
         session.order = {};
-        session.history = [];
-        session.product = null;
-        session.sentImage = false;
-        session.listCandidates = null;
 
         await setSession(userPhone, session);
         return;
@@ -953,12 +729,12 @@ ${locationInfo}`;
     }
 
     // =============================
-    // ✅ AUDIO / OTROS TIPOS
-    // (NO se usan ahora, se dejan para luego)
+    // ⛔ Botones tipo Reply (YA NO SE USAN)
+    // (Se deja comentado, NO se borra)
     // =============================
     /*
-    if (msgType === "audio") {
-      // aquí iba Whisper...
+    if (msgType === "button") {
+      // Antes se usaba payload VER_CATALOGO...
     }
     */
 
