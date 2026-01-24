@@ -520,7 +520,7 @@ async function processInboundWhatsApp(body) {
           `Bienvenida a Glowny Essentials 💗\n\n` +
           `🛍️ Puedes hacer tu pedido fácil desde nuestro *Catálogo de WhatsApp*.\n` +
           `✅ Selecciona tus productos y cuando termines tu carrito,\n` +
-          `envíame tu *ubicación* 📍 para finalizar 💗`;
+          `envíame tu *ubicación* 📍y uno de nuestros representantes se pondrá en contacto contigo.💗`;
 
         // ✅ botón real que abre el catálogo
         await sendWhatsAppCtaUrl(
