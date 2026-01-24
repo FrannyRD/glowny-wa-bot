@@ -97,7 +97,7 @@ function isGreetingOnly(text) {
 // =============================
 // Cargar catálogo
 // (se mantiene, porque se usa para mapear carrito meta)
- // =============================
+// =============================
 const catalog = require("./catalog.json");
 
 const productIndex = catalog.map((prod) => {
@@ -488,69 +488,71 @@ async function processInboundWhatsApp(body) {
     }
 
     // =============================
-    // ✅ 1) TEXTO (SOLO SALUDO -> bienvenida con botón que ABRE catálogo)
+    // ✅ 1) TEXTO (CON CUALQUIER PALABRA -> manda saludo con botón catálogo)
     // =============================
+    if (msgType === "text") {
+      const userText = msg.text?.body?.trim() || "";
 
-if (msgType === "text") {
-  const userText = msg.text?.body?.trim() || "";
+      await sendToChatwoot({
+        session,
+        from: userPhone,
+        name: customerName || userPhone,
+        message: userText,
+      });
 
-  await sendToChatwoot({
-    session,
-    from: userPhone,
-    name: customerName || userPhone,
-    message: userText,
-  });
+      // ✅ modo manual: no responder
+      if (MANUAL_MODE) {
+        await setSession(userPhone, session);
+        return;
+      }
 
-  // ✅ modo manual: no responder
-  if (MANUAL_MODE) {
-    await setSession(userPhone, session);
-    return;
-  }
+      // ✅ Si el cliente ya tiene un carrito y estamos esperando ubicación,
+      // NO mandamos bienvenida para no confundir.
+      // Aquí solo recordamos que envíe la ubicación.
+      if (session.state === "AWAIT_LOCATION") {
+        await sendWhatsAppText(
+          userPhone,
+          "Perfecto 😊📍\nPara finalizar tu pedido, envíame tu ubicación (clip 📎 > Ubicación > Enviar) 💗"
+        );
+        await setSession(userPhone, session);
+        return;
+      }
 
-  const now = Date.now();
+      // ✅ ANTI-DUPLICADO: no repetir bienvenida cada 2 segundos
+      const last = session.last_welcome_ts || 0;
+      if (Date.now() - last < 15000) {
+        await setSession(userPhone, session);
+        return;
+      }
+      session.last_welcome_ts = Date.now();
 
-  // ✅ evitar mandar la bienvenida muchas veces
-  const lastWelcome = session.last_welcome_ts || 0;
-  const recentlyWelcomed = now - lastWelcome < 60 * 60 * 1000; // 1 hora
+      const greetingName = customerName ? ` ${customerName}` : "";
+      const welcomeText =
+        `¡Hola${greetingName}! 😊✨\n` +
+        `Bienvenida a Glowny Essentials 💗\n\n` +
+        `🛍️ Puedes hacer tu pedido fácil desde nuestro *Catálogo de WhatsApp*.\n` +
+        `✅ Selecciona tus productos y cuando termines tu carrito,\n` +
+        `envíame tu *ubicación* 📍 para finalizar 💗`;
 
-  // ✅ si hay carrito pendiente, NO mandar bienvenida
-  const hasCartInProgress =
-    session.state === "AWAIT_LOCATION" && session.order?.items?.length;
+      // ✅ botón real que abre el catálogo (CTA URL)
+      await sendWhatsAppCtaUrl(
+        userPhone,
+        welcomeText,
+        "🛍️ Ver catálogo",
+        WHATSAPP_CATALOG_URL
+      );
 
-  // ✅ ENVIAR BIENVENIDA SIEMPRE que no haya carrito y no se haya enviado recientemente
-  if (!hasCartInProgress && !recentlyWelcomed) {
-    session.last_welcome_ts = now;
+      await sendBotToChatwoot({
+        session,
+        from: userPhone,
+        name: customerName || userPhone,
+        message: "BOT: Bienvenida enviada (cualquier texto) con CTA URL.",
+      });
 
-    const greetingName = customerName ? ` ${customerName}` : "";
-    const welcomeText =
-      `¡Hola${greetingName}! 😊✨\n` +
-      `Bienvenida a Glowny Essentials 💗\n\n` +
-      `🛍️ Puedes hacer tu pedido fácil desde nuestro *Catálogo de WhatsApp*.\n` +
-      `✅ Selecciona tus productos y cuando termines tu carrito,\n` +
-      `envíame tu *ubicación* 📍 y uno de nuestros representantes se pondra en contacto contigo 💗`;
+      await setSession(userPhone, session);
+      return;
+    }
 
-    await sendWhatsAppCtaUrl(
-      userPhone,
-      welcomeText,
-      "🛍️ Ver catálogo",
-      WHATSAPP_CATALOG_URL
-    );
-
-    await sendBotToChatwoot({
-      session,
-      from: userPhone,
-      name: customerName || userPhone,
-      message: "BOT: Bienvenida enviada con CTA URL (abre catálogo).",
-    });
-
-    await setSession(userPhone, session);
-    return;
-  }
-
-  // ✅ Si ya se mandó bienvenida recientemente, no responder más
-  await setSession(userPhone, session);
-  return;
-}
     // =============================
     // ✅ 2) META CATALOG - ORDER (Recibir carrito + pedir ubicación)
     // =============================
