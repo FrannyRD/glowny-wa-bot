@@ -27,6 +27,11 @@ const CHATWOOT_ACCOUNT_ID = process.env.CHATWOOT_ACCOUNT_ID;
 const CHATWOOT_INBOX_ID = process.env.CHATWOOT_INBOX_ID;
 const CHATWOOT_API_TOKEN = process.env.CHATWOOT_API_TOKEN;
 
+// ✅ MODO MANUAL: Solo Chatwoot (sin respuestas automáticas)
+const MANUAL_MODE = String(process.env.MANUAL_MODE || "")
+  .trim()
+  .toLowerCase() === "true";
+
 // =============================
 // Helpers
 // =============================
@@ -487,7 +492,7 @@ async function cwGetOrCreateConversation({ session, phone, contactId }) {
   }
 }
 
-// ✅ FIX DEFINITIVO: message_type = 0 (incoming real)
+// ✅ INCOMING real
 async function sendToChatwoot({ session, from, name, message }) {
   if (!chatwootEnabled()) return;
 
@@ -511,7 +516,7 @@ async function sendToChatwoot({ session, from, name, message }) {
       `${cwBase()}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/conversations/${conversationId}/messages`,
       {
         content: message,
-        message_type: 0, // ✅ INCOMING (evita error al enviar)
+        message_type: 0,
         private: false,
       },
       { headers: chatwootHeaders() }
@@ -521,7 +526,7 @@ async function sendToChatwoot({ session, from, name, message }) {
   }
 }
 
-// ✅ BOT LOG COMO NOTA PRIVADA: message_type = 1 + private true
+// ✅ BOT LOG COMO NOTA PRIVADA
 async function sendBotToChatwoot({ session, from, name, message }) {
   if (!chatwootEnabled()) return;
 
@@ -545,8 +550,8 @@ async function sendBotToChatwoot({ session, from, name, message }) {
       `${cwBase()}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/conversations/${conversationId}/messages`,
       {
         content: message,
-        message_type: 1, // ✅ OUTGOING
-        private: true, // ✅ NO SE REENVÍA A WA
+        message_type: 1,
+        private: true,
       },
       { headers: chatwootHeaders() }
     );
@@ -560,24 +565,14 @@ app.post("/chatwoot/webhook", async (req, res) => {
   try {
     const event = req.body;
 
-    // message_type puede venir string o número
     const mt = event?.message_type;
     const isOutgoing = mt === "outgoing" || mt === 1;
-
     if (!isOutgoing) return res.sendStatus(200);
 
-    // ✅ FIX: Ignorar private notes
     if (event?.private === true) return res.sendStatus(200);
 
-    // ✅ FIX: Solo si el sender es HUMANO (agente)
     const senderType = String(event?.sender?.type || "").toLowerCase();
-    if (senderType && senderType !== "user") {
-      // sender.type en chatwoot normalmente:
-      // "user" = agente/humano
-      // "contact" = cliente
-      // "agent_bot" / "bot" = bot
-      return res.sendStatus(200);
-    }
+    if (senderType && senderType !== "user") return res.sendStatus(200);
 
     const content = event?.content?.trim();
     if (!content) return res.sendStatus(200);
@@ -750,22 +745,18 @@ app.get("/webhook", (req, res) => {
 });
 
 // =============================
-// WEBHOOK MAIN
+// ✅ PROCESADOR PRINCIPAL (para evitar duplicados y timeouts)
 // =============================
-app.post("/webhook", async (req, res) => {
+async function processInboundWhatsApp(body) {
   try {
-    const body = req.body;
-
-    if (body.object !== "whatsapp_business_account") {
-      return res.sendStatus(404);
-    }
+    if (body.object !== "whatsapp_business_account") return;
 
     const entry = body.entry?.[0];
     const change = entry?.changes?.[0];
     const value = change?.value;
 
     const messages = value?.messages;
-    if (!messages || messages.length === 0) return res.sendStatus(200);
+    if (!messages || messages.length === 0) return;
 
     const msg = messages[0];
     const userPhone = msg.from;
@@ -780,18 +771,35 @@ app.post("/webhook", async (req, res) => {
     if (!session.state) session.state = "INIT";
     if (!session.listCandidates) session.listCandidates = null;
 
-    // ✅ DEDUPE por msgId
-    if (msgId && session.last_wa_msg_id === msgId) {
-      return res.sendStatus(200);
-    }
+    // ✅ DEDUPE fuerte por msgId
+    if (msgId && session.last_wa_msg_id === msgId) return;
     if (msgId) session.last_wa_msg_id = msgId;
+
+    // ✅ DEDUPE extra por texto + 10s (evita saludos repetidos por retry)
+    const now = Date.now();
+    const textForDedupe =
+      msgType === "text" ? (msg.text?.body || "").trim() : "";
+    if (textForDedupe) {
+      const fp = `${normalizeText(textForDedupe)}|${msgType}`;
+      if (
+        session.last_fp === fp &&
+        session.last_fp_ts &&
+        now - session.last_fp_ts < 10000
+      ) {
+        return;
+      }
+      session.last_fp = fp;
+      session.last_fp_ts = now;
+    }
 
     if (session.human_until && Date.now() > session.human_until) {
       session.human_until = null;
     }
 
-    // ✅ helper de respuesta
+    // ✅ helper de respuesta (solo si NO está en modo manual)
     async function botReply(text) {
+      if (MANUAL_MODE) return;
+
       await sendWhatsAppText(userPhone, text);
 
       await sendBotToChatwoot({
@@ -815,19 +823,23 @@ app.post("/webhook", async (req, res) => {
         message: userText,
       });
 
+      // ✅ MODO MANUAL: no responde automático, solo Chatwoot
+      if (MANUAL_MODE) {
+        await setSession(userPhone, session);
+        return;
+      }
+
       // ✅ si humano está atendiendo, bot pausa
       if (session.human_until && Date.now() < session.human_until) {
         await setSession(userPhone, session);
         return;
       }
 
-      // ✅ ANTI-DUPLICADO DE SALUDO
+      // ✅ ANTI-DUPLICADO DE SALUDO (hard)
       const greetingOnly = isGreetingOnly(userText);
       if (greetingOnly) {
-        const now = Date.now();
         const last = session.last_greeting_reply_ts || 0;
-
-        if (now - last < 10000) {
+        if (Date.now() - last < 15000) {
           await setSession(userPhone, session);
           return;
         }
@@ -836,6 +848,7 @@ app.post("/webhook", async (req, res) => {
       const hasCartInProgress =
         session.state === "AWAIT_LOCATION" && session.order?.items?.length;
 
+      // ✅ si hay carrito por meta y saludan
       if (greetingOnly && hasCartInProgress) {
         session.last_greeting_reply_ts = Date.now();
 
@@ -851,9 +864,11 @@ app.post("/webhook", async (req, res) => {
         session.state === "AWAIT_LOCATION" &&
         (session.order?.items?.length || session.order?.quantity);
 
+      // ✅ SALUDO NORMAL (sin mostrar productos)
       if (greetingOnly && !hasOrderInProgress) {
         session.last_greeting_reply_ts = Date.now();
 
+        // ✅ resetea para evitar que se arrastre un producto viejo
         session.state = "INIT";
         session.product = null;
         session.sentImage = false;
@@ -861,8 +876,12 @@ app.post("/webhook", async (req, res) => {
         session.order = {};
 
         const greetingName = customerName ? ` ${customerName}` : "";
-        const botMsg = `¡Hola${greetingName}! 😊✨\nBienvenida a Glowny Essentials 💗\nCuéntame, ¿qué producto estás buscando hoy?🛒\nSi prefieres, puedes elegirlo y hacer tu pedido directamente desde nuestro \ncatálogo de WhatsApp 🛍️✨`;
-        
+        const botMsg =
+          `¡Hola${greetingName}! 😊✨\n` +
+          `Bienvenida a Glowny Essentials 💗\n` +
+          `Cuéntame, ¿qué producto estás buscando hoy?\n\n` +
+          `🛍️ También puedes elegirlo y hacer tu pedido desde nuestro *catálogo de WhatsApp* 🛒✨`;
+
         await botReply(botMsg);
         await setSession(userPhone, session);
         return;
@@ -964,10 +983,14 @@ app.post("/webhook", async (req, res) => {
 
       let currentProduct = session.product || null;
       const found = findProductForMessage(userText);
+
+      // ✅ Solo setea producto si lo encontró por el MENSAJE actual
+      let matchedByThisMessage = false;
       if (found) {
         currentProduct = found.data;
         session.product = currentProduct;
         session.sentImage = false;
+        matchedByThisMessage = true;
       }
 
       if (!currentProduct) {
@@ -1027,8 +1050,17 @@ app.post("/webhook", async (req, res) => {
       session.history.push({ user: userText, assistant: aiReply });
       if (session.history.length > 6) session.history.shift();
 
-      if (!session.sentImage && currentProduct.image) {
-        await sendWhatsAppImage(userPhone, currentProduct.image, currentProduct.name);
+      // ✅ ENVIAR IMAGEN SOLO si el producto fue detectado por el mensaje actual
+      if (
+        matchedByThisMessage &&
+        !session.sentImage &&
+        currentProduct.image
+      ) {
+        await sendWhatsAppImage(
+          userPhone,
+          currentProduct.image,
+          currentProduct.name
+        );
         session.sentImage = true;
       }
 
@@ -1038,7 +1070,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     // =============================
-    // ✅ META CATALOG - ORDER
+    // ✅ META CATALOG - ORDER (NO TOCAR)
     // =============================
     if (msgType === "order") {
       const order = msg.order;
@@ -1051,9 +1083,15 @@ app.post("/webhook", async (req, res) => {
         message: `🛒 Carrito recibido (Meta Catalog) - ${items.length} item(s)`,
       });
 
+      // ✅ MODO MANUAL: no responde automático, solo Chatwoot
+      if (MANUAL_MODE) {
+        await setSession(userPhone, session);
+        return;
+      }
+
       if (session.human_until && Date.now() < session.human_until) {
         await setSession(userPhone, session);
-        return res.sendStatus(200);
+        return;
       }
 
       if (!items.length) {
@@ -1062,7 +1100,7 @@ app.post("/webhook", async (req, res) => {
           "Recibí tu carrito 😊🛒\nPero no veo productos dentro. ¿Quieres decirme qué producto te interesa? 💗"
         );
         await setSession(userPhone, session);
-        return res.sendStatus(200);
+        return;
       }
 
       const parsedItems = [];
@@ -1123,7 +1161,7 @@ app.post("/webhook", async (req, res) => {
       });
 
       await setSession(userPhone, session);
-      return res.sendStatus(200);
+      return;
     }
 
     // =============================
@@ -1132,7 +1170,7 @@ app.post("/webhook", async (req, res) => {
     if (msgType === "text") {
       const userText = msg.text?.body?.trim() || "";
       await handleText(userText);
-      return res.sendStatus(200);
+      return;
     }
 
     // =============================
@@ -1141,20 +1179,26 @@ app.post("/webhook", async (req, res) => {
     if (msgType === "audio") {
       const mediaId = msg.audio?.id;
 
+      await sendToChatwoot({
+        session,
+        from: userPhone,
+        name: customerName || userPhone,
+        message: "🎤 Nota de voz recibida",
+      });
+
+      // ✅ MODO MANUAL: no responde automático, solo Chatwoot
+      if (MANUAL_MODE) {
+        await setSession(userPhone, session);
+        return;
+      }
+
       if (!mediaId) {
         const fallback =
           "Recibido 😊✨\nNo pude escuchar bien el audio. ¿Me lo escribes por favor? 💗";
 
-        await sendToChatwoot({
-          session,
-          from: userPhone,
-          name: customerName || userPhone,
-          message: "🎤 Nota de voz recibida (no pude leer el mediaId).",
-        });
-
         if (session.human_until && Date.now() < session.human_until) {
           await setSession(userPhone, session);
-          return res.sendStatus(200);
+          return;
         }
 
         await sendWhatsAppText(userPhone, fallback);
@@ -1166,7 +1210,7 @@ app.post("/webhook", async (req, res) => {
         });
 
         await setSession(userPhone, session);
-        return res.sendStatus(200);
+        return;
       }
 
       const transcript = await transcribeWhatsAppAudio(mediaId);
@@ -1175,16 +1219,9 @@ app.post("/webhook", async (req, res) => {
         const fallback =
           "Recibido 😊✨\nNo pude entender el audio. ¿Me lo escribes por favor? 💗";
 
-        await sendToChatwoot({
-          session,
-          from: userPhone,
-          name: customerName || userPhone,
-          message: "🎤 Nota de voz recibida (no se pudo transcribir).",
-        });
-
         if (session.human_until && Date.now() < session.human_until) {
           await setSession(userPhone, session);
-          return res.sendStatus(200);
+          return;
         }
 
         await sendWhatsAppText(userPhone, fallback);
@@ -1196,18 +1233,18 @@ app.post("/webhook", async (req, res) => {
         });
 
         await setSession(userPhone, session);
-        return res.sendStatus(200);
+        return;
       }
 
       await sendToChatwoot({
         session,
         from: userPhone,
         name: customerName || userPhone,
-        message: `🎤 Nota de voz transcrita: ${transcript}`,
+        message: `🎤 Transcripción: ${transcript}`,
       });
 
       await handleText(transcript);
-      return res.sendStatus(200);
+      return;
     }
 
     // =============================
@@ -1215,7 +1252,7 @@ app.post("/webhook", async (req, res) => {
     // =============================
     if (msgType === "location") {
       const loc = msg.location;
-      if (!loc) return res.sendStatus(200);
+      if (!loc) return;
 
       const mapPreview =
         loc.latitude && loc.longitude
@@ -1229,9 +1266,15 @@ app.post("/webhook", async (req, res) => {
         message: mapPreview,
       });
 
+      // ✅ MODO MANUAL: no responde automático, solo Chatwoot
+      if (MANUAL_MODE) {
+        await setSession(userPhone, session);
+        return;
+      }
+
       if (session.human_until && Date.now() < session.human_until) {
         await setSession(userPhone, session);
-        return res.sendStatus(200);
+        return;
       }
 
       if (session.state === "AWAIT_LOCATION") {
@@ -1306,7 +1349,7 @@ ${locationInfo}`;
         session.listCandidates = null;
 
         await setSession(userPhone, session);
-        return res.sendStatus(200);
+        return;
       }
 
       await sendWhatsAppText(
@@ -1322,15 +1365,26 @@ ${locationInfo}`;
       });
 
       await setSession(userPhone, session);
-      return res.sendStatus(200);
+      return;
     }
 
     await setSession(userPhone, session);
-    return res.sendStatus(200);
   } catch (err) {
-    console.error("❌ Error webhook:", err);
-    return res.sendStatus(200);
+    console.error("❌ Error procesando inbound:", err?.response?.data || err);
   }
+}
+
+// =============================
+// ✅ WEBHOOK MAIN (ACK inmediato)
+// =============================
+app.post("/webhook", (req, res) => {
+  // ✅ Respondemos rápido para evitar reintentos/duplicados
+  res.sendStatus(200);
+
+  // ✅ Procesamos en background (sin bloquear WhatsApp)
+  setImmediate(() => {
+    processInboundWhatsApp(req.body);
+  });
 });
 
 // =============================
@@ -1339,4 +1393,5 @@ ${locationInfo}`;
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Bot de Glowny Essentials escuchando en el puerto ${PORT}`);
+  console.log(`🤖 MANUAL_MODE = ${MANUAL_MODE ? "ON (solo Chatwoot)" : "OFF"}`);
 });
