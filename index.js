@@ -490,62 +490,67 @@ async function processInboundWhatsApp(body) {
     // =============================
     // ✅ 1) TEXTO (SOLO SALUDO -> bienvenida con botón que ABRE catálogo)
     // =============================
-    if (msgType === "text") {
-      const userText = msg.text?.body?.trim() || "";
 
-      await sendToChatwoot({
-        session,
-        from: userPhone,
-        name: customerName || userPhone,
-        message: userText,
-      });
+if (msgType === "text") {
+  const userText = msg.text?.body?.trim() || "";
 
-      // ✅ modo manual: no responder
-      if (MANUAL_MODE) {
-        await setSession(userPhone, session);
-        return;
-      }
+  await sendToChatwoot({
+    session,
+    from: userPhone,
+    name: customerName || userPhone,
+    message: userText,
+  });
 
-      if (isGreetingOnly(userText)) {
-        const last = session.last_greeting_reply_ts || 0;
-        if (Date.now() - last < 15000) {
-          await setSession(userPhone, session);
-          return;
-        }
-        session.last_greeting_reply_ts = Date.now();
+  // ✅ modo manual: no responder
+  if (MANUAL_MODE) {
+    await setSession(userPhone, session);
+    return;
+  }
 
-        const greetingName = customerName ? ` ${customerName}` : "";
-        const welcomeText =
-          `¡Hola${greetingName}! 😊✨\n` +
-          `Bienvenida a Glowny Essentials 💗\n\n` +
-          `🛍️ Puedes hacer tu pedido fácil desde nuestro *Catálogo de WhatsApp*.\n` +
-          `✅ Selecciona tus productos y cuando termines tu carrito,\n` +
-          `envíame tu *ubicación* 📍y uno de nuestros representantes se pondrá en contacto contigo.💗`;
+  const now = Date.now();
 
-        // ✅ botón real que abre el catálogo
-        await sendWhatsAppCtaUrl(
-          userPhone,
-          welcomeText,
-          "Ver catálogo",
-          WHATSAPP_CATALOG_URL
-        );
+  // ✅ evitar mandar la bienvenida muchas veces
+  const lastWelcome = session.last_welcome_ts || 0;
+  const recentlyWelcomed = now - lastWelcome < 60 * 60 * 1000; // 1 hora
 
-        await sendBotToChatwoot({
-          session,
-          from: userPhone,
-          name: customerName || userPhone,
-          message: "BOT: Bienvenida enviada con CTA URL (abre catálogo).",
-        });
+  // ✅ si hay carrito pendiente, NO mandar bienvenida
+  const hasCartInProgress =
+    session.state === "AWAIT_LOCATION" && session.order?.items?.length;
 
-        await setSession(userPhone, session);
-        return;
-      }
+  // ✅ ENVIAR BIENVENIDA SIEMPRE que no haya carrito y no se haya enviado recientemente
+  if (!hasCartInProgress && !recentlyWelcomed) {
+    session.last_welcome_ts = now;
 
-      // Si no es saludo, no responde automático
-      await setSession(userPhone, session);
-      return;
-    }
+    const greetingName = customerName ? ` ${customerName}` : "";
+    const welcomeText =
+      `¡Hola${greetingName}! 😊✨\n` +
+      `Bienvenida a Glowny Essentials 💗\n\n` +
+      `🛍️ Puedes hacer tu pedido fácil desde nuestro *Catálogo de WhatsApp*.\n` +
+      `✅ Selecciona tus productos y cuando termines tu carrito,\n` +
+      `envíame tu *ubicación* 📍 y uno de nuestros representantes se pondra en contacto contigo 💗`;
 
+    await sendWhatsAppCtaUrl(
+      userPhone,
+      welcomeText,
+      "🛍️ Ver catálogo",
+      WHATSAPP_CATALOG_URL
+    );
+
+    await sendBotToChatwoot({
+      session,
+      from: userPhone,
+      name: customerName || userPhone,
+      message: "BOT: Bienvenida enviada con CTA URL (abre catálogo).",
+    });
+
+    await setSession(userPhone, session);
+    return;
+  }
+
+  // ✅ Si ya se mandó bienvenida recientemente, no responder más
+  await setSession(userPhone, session);
+  return;
+}
     // =============================
     // ✅ 2) META CATALOG - ORDER (Recibir carrito + pedir ubicación)
     // =============================
