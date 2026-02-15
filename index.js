@@ -39,7 +39,7 @@ const WHATSAPP_CATALOG_URL = "https://wa.me/c/18495828578";
 const WELCOME_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 // =============================
-// ✅ FOLLOW-UP / RECORDATORIOS (NUEVO)
+// ✅ FOLLOW-UP / RECORDATORIOS (EXISTENTE)
 // - Cada 4 horas por las primeras 24 horas (máx 6)
 // - Solo si: fue el primer mensaje y NO volvió a escribir (2do mensaje) y NO envió carrito (order)
 // =============================
@@ -82,6 +82,9 @@ async function startRemindersIfEligible(userPhone, session) {
   if (!session.order) session.order = {};
   if (!session.state) session.state = "INIT";
 
+  // ✅ si estamos usando la cola /tick, no usamos timers en memoria (NUEVO)
+  if (session.followup && session.followup.use_tick === true) return;
+
   // contador de mensajes entrantes del usuario
   if (!session.inbound_text_count) session.inbound_text_count = 0;
 
@@ -113,6 +116,9 @@ async function scheduleNextReminder(userPhone) {
   const session = (await getSession(userPhone)) || {};
   const fu = session.followup || {};
 
+  // ✅ si estamos usando la cola /tick, no usamos timers en memoria (NUEVO)
+  if (fu.use_tick === true) return;
+
   if (!fu.active) return;
 
   const started = fu.started_ts || Date.now();
@@ -137,13 +143,20 @@ async function scheduleNextReminder(userPhone) {
   }
 
   // Si ya llegó carrito (order), cancelar
-  if (session.order && session.order.items && Array.isArray(session.order.items) && session.order.items.length > 0) {
+  if (
+    session.order &&
+    session.order.items &&
+    Array.isArray(session.order.items) &&
+    session.order.items.length > 0
+  ) {
     await cancelReminders(userPhone, session, "order_received");
     return;
   }
 
   const last = fu.last_sent_ts || 0;
-  const nextDue = last ? last + REMINDER_INTERVAL_MS : started + REMINDER_INTERVAL_MS;
+  const nextDue = last
+    ? last + REMINDER_INTERVAL_MS
+    : started + REMINDER_INTERVAL_MS;
   const delay = Math.max(1000, nextDue - now);
 
   const timer = setTimeout(async () => {
@@ -154,13 +167,21 @@ async function scheduleNextReminder(userPhone) {
       if (!s.state) s.state = "INIT";
       if (!s.followup) s.followup = {};
 
+      // ✅ si estamos usando la cola /tick, no usamos timers en memoria (NUEVO)
+      if (s.followup.use_tick === true) return;
+
       // condiciones de cancelación
       if (!s.followup.active) return;
       if ((s.inbound_text_count || 0) >= 2) {
         await cancelReminders(userPhone, s, "user_sent_second_message");
         return;
       }
-      if (s.order && s.order.items && Array.isArray(s.order.items) && s.order.items.length > 0) {
+      if (
+        s.order &&
+        s.order.items &&
+        Array.isArray(s.order.items) &&
+        s.order.items.length > 0
+      ) {
         await cancelReminders(userPhone, s, "order_received");
         return;
       }
@@ -194,7 +215,9 @@ async function scheduleNextReminder(userPhone) {
         session: s,
         from: userPhone,
         name: userPhone,
-        message: `BOT: Recordatorio catálogo enviado (${(s.followup.count || 0) + 1}/${REMINDER_MAX_COUNT}).`,
+        message: `BOT: Recordatorio catálogo enviado (${
+          (s.followup.count || 0) + 1
+        }/${REMINDER_MAX_COUNT}).`,
       });
 
       // actualizar estado
@@ -215,6 +238,213 @@ async function scheduleNextReminder(userPhone) {
   }, delay);
 
   reminderTimers.set(String(userPhone), timer);
+}
+
+// =============================
+// ✅ FOLLOW-UP ROBUSTO (NUEVO) - Upstash Queue + /tick
+// - Guarda en Upstash (ZSET) cuándo toca el próximo recordatorio
+// - UptimeRobot pega a /tick para procesar vencidos
+// =============================
+const TICK_TOKEN = process.env.TICK_TOKEN || "";
+
+const FOLLOWUP_ZSET_KEY = "followup:due";
+const FOLLOWUP_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4h
+const FOLLOWUP_MAX_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h
+const FOLLOWUP_MAX_COUNT = 6;
+const FOLLOWUP_BATCH_LIMIT = 25;
+
+async function redisCmd(cmdArr) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
+
+  try {
+    const res = await axios.post(UPSTASH_URL, cmdArr, {
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+    });
+    return res.data?.result ?? null;
+  } catch (e) {
+    console.error("❌ Redis cmd error:", e?.response?.data || e.message);
+    return null;
+  }
+}
+
+async function scheduleFollowupTick(userPhone, session) {
+  if (MANUAL_MODE) return;
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
+
+  const now = Date.now();
+  session = session || (await getSession(userPhone)) || {};
+  if (!session.order) session.order = {};
+  if (!session.state) session.state = "INIT";
+  if (typeof session.inbound_text_count !== "number")
+    session.inbound_text_count = 0;
+
+  // Solo si es 1er mensaje (texto) y todavía no hay carrito
+  if (session.inbound_text_count !== 1) return;
+  if (session.order?.items?.length) return;
+
+  if (!session.followup) session.followup = {};
+  session.followup.use_tick = true; // ✅ marca que usamos cola /tick
+  session.followup.active = true;
+  session.followup.cancelled = false;
+  session.followup.started_ts = session.followup.started_ts || now;
+  session.followup.count = session.followup.count || 0;
+
+  // Para que el primer recordatorio salga 4h después del primer mensaje
+  session.followup.next_due_ts =
+    session.followup.next_due_ts || now + FOLLOWUP_INTERVAL_MS;
+
+  // Evita duplicar timers en memoria si ya existían
+  clearUserReminderTimer(userPhone);
+
+  await setSession(userPhone, session);
+
+  // ZADD score=next_due_ts member=userPhone
+  await redisCmd([
+    "ZADD",
+    FOLLOWUP_ZSET_KEY,
+    String(session.followup.next_due_ts),
+    String(userPhone),
+  ]);
+}
+
+async function cancelFollowupTick(userPhone, session, reason = "cancelled") {
+  session = session || (await getSession(userPhone)) || {};
+  if (!session.order) session.order = {};
+  if (!session.state) session.state = "INIT";
+  if (!session.followup) session.followup = {};
+
+  session.followup.use_tick = true; // mantiene la marca
+  session.followup.active = false;
+  session.followup.cancelled = true;
+  session.followup.cancel_reason = reason;
+  session.followup.cancelled_ts = Date.now();
+  session.followup.next_due_ts = 0;
+
+  clearUserReminderTimer(userPhone);
+  await setSession(userPhone, session);
+
+  await redisCmd(["ZREM", FOLLOWUP_ZSET_KEY, String(userPhone)]);
+}
+
+async function processDueFollowupsTick(limit = FOLLOWUP_BATCH_LIMIT) {
+  if (MANUAL_MODE) return;
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
+
+  const now = Date.now();
+
+  const due = await redisCmd([
+    "ZRANGEBYSCORE",
+    FOLLOWUP_ZSET_KEY,
+    "-inf",
+    String(now),
+    "LIMIT",
+    "0",
+    String(limit),
+  ]);
+
+  if (!due || !Array.isArray(due) || due.length === 0) return;
+
+  for (const userPhone of due) {
+    try {
+      let session = (await getSession(userPhone)) || {};
+      if (!session.order) session.order = {};
+      if (!session.state) session.state = "INIT";
+      if (!session.followup) session.followup = {};
+      if (typeof session.inbound_text_count !== "number")
+        session.inbound_text_count = 0;
+
+      // Si humano está atendiendo, reprograma 10 min
+      if (session.human_until && Date.now() < session.human_until) {
+        session.followup.use_tick = true;
+        session.followup.next_due_ts = Date.now() + 10 * 60 * 1000;
+        await setSession(userPhone, session);
+        await redisCmd([
+          "ZADD",
+          FOLLOWUP_ZSET_KEY,
+          String(session.followup.next_due_ts),
+          String(userPhone),
+        ]);
+        continue;
+      }
+
+      // Cancelaciones
+      if (session.followup.active !== true) {
+        await redisCmd(["ZREM", FOLLOWUP_ZSET_KEY, String(userPhone)]);
+        continue;
+      }
+
+      if ((session.inbound_text_count || 0) >= 2) {
+        await cancelFollowupTick(userPhone, session, "user_sent_second_message");
+        continue;
+      }
+
+      if (session.order?.items?.length) {
+        await cancelFollowupTick(userPhone, session, "order_received");
+        continue;
+      }
+
+      const started = session.followup.started_ts || now;
+      if (now - started > FOLLOWUP_MAX_WINDOW_MS) {
+        await cancelFollowupTick(userPhone, session, "window_expired");
+        continue;
+      }
+
+      if ((session.followup.count || 0) >= FOLLOWUP_MAX_COUNT) {
+        await cancelFollowupTick(userPhone, session, "max_count_reached");
+        continue;
+      }
+
+      // ✅ enviar recordatorio
+      await sendWhatsAppCtaUrl(
+        userPhone,
+        "👋✨ Solo paso por aquí rapidito…\n¿Quieres ver el catálogo y elegir tus productos? 💗",
+        "🛍️ Ver catálogo",
+        WHATSAPP_CATALOG_URL
+      );
+
+      await sendBotToChatwoot({
+        session,
+        from: userPhone,
+        name: userPhone,
+        message: `BOT: Follow-up /tick enviado (${
+          (session.followup.count || 0) + 1
+        }/${FOLLOWUP_MAX_COUNT}).`,
+      });
+
+      session.followup.use_tick = true;
+      session.followup.count = (session.followup.count || 0) + 1;
+
+      if (session.followup.count >= FOLLOWUP_MAX_COUNT) {
+        await cancelFollowupTick(userPhone, session, "max_count_reached");
+        continue;
+      }
+
+      session.followup.next_due_ts = Date.now() + FOLLOWUP_INTERVAL_MS;
+      await setSession(userPhone, session);
+
+      await redisCmd([
+        "ZADD",
+        FOLLOWUP_ZSET_KEY,
+        String(session.followup.next_due_ts),
+        String(userPhone),
+      ]);
+    } catch (e) {
+      console.error(
+        "❌ processDueFollowupsTick item error:",
+        e?.response?.data || e.message || e
+      );
+      // reprograma 10 min para evitar loop
+      try {
+        const fallback = Date.now() + 10 * 60 * 1000;
+        await redisCmd([
+          "ZADD",
+          FOLLOWUP_ZSET_KEY,
+          String(fallback),
+          String(userPhone),
+        ]);
+      } catch (_) {}
+    }
+  }
 }
 
 // =============================
@@ -297,11 +527,9 @@ async function getSession(userId) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
 
   try {
-    const res = await axios.post(
-      UPSTASH_URL,
-      ["GET", `session:${userId}`],
-      { headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` } }
-    );
+    const res = await axios.post(UPSTASH_URL, ["GET", `session:${userId}`], {
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+    });
 
     if (res.data && res.data.result) {
       return JSON.parse(res.data.result);
@@ -636,6 +864,26 @@ app.get("/webhook", (req, res) => {
 });
 
 // =============================
+// ✅ HEALTH + TICK (NUEVO)
+// =============================
+app.get("/health", (req, res) => {
+  res.status(200).send("ok");
+});
+
+app.get("/tick", async (req, res) => {
+  try {
+    const token = String(req.query?.token || "");
+    if (!TICK_TOKEN || token !== TICK_TOKEN) return res.sendStatus(403);
+
+    await processDueFollowupsTick();
+    return res.status(200).send("tick ok");
+  } catch (e) {
+    console.error("❌ /tick error:", e?.response?.data || e.message || e);
+    return res.status(200).send("tick ok");
+  }
+});
+
+// =============================
 // ✅ PROCESADOR PRINCIPAL
 // =============================
 async function processInboundWhatsApp(body) {
@@ -661,7 +909,8 @@ async function processInboundWhatsApp(body) {
     if (!session.state) session.state = "INIT";
 
     // ✅ contador de textos entrantes (NUEVO)
-    if (typeof session.inbound_text_count !== "number") session.inbound_text_count = 0;
+    if (typeof session.inbound_text_count !== "number")
+      session.inbound_text_count = 0;
 
     // ✅ DEDUPE por msgId
     if (msgId && session.last_wa_msg_id === msgId) return;
@@ -692,6 +941,7 @@ async function processInboundWhatsApp(body) {
       // ✅ Si ya escribió 2do mensaje => cancelar recordatorios (NUEVO)
       if (session.inbound_text_count >= 2) {
         await cancelReminders(userPhone, session, "user_sent_second_message");
+        await cancelFollowupTick(userPhone, session, "user_sent_second_message");
       }
 
       // ✅ modo manual: no responder
@@ -707,7 +957,10 @@ async function processInboundWhatsApp(body) {
       // ✅ Si es primer mensaje (inbound_text_count === 1), activamos recordatorios (NUEVO)
       // (Solo se activan si no escribe un segundo mensaje y no envía carrito)
       if (session.inbound_text_count === 1) {
-        // marca followup para recordatorios
+        // ✅ robusto: cola Upstash + /tick
+        await scheduleFollowupTick(userPhone, session);
+
+        // (Se mantiene el método viejo, pero al marcar use_tick, no correrá timers)
         await startRemindersIfEligible(userPhone, session);
       }
 
@@ -762,6 +1015,7 @@ async function processInboundWhatsApp(body) {
 
       // ✅ Si llegó carrito => cancelar recordatorios (NUEVO)
       await cancelReminders(userPhone, session, "order_received");
+      await cancelFollowupTick(userPhone, session, "order_received");
 
       if (MANUAL_MODE) {
         await setSession(userPhone, session);
@@ -918,7 +1172,16 @@ ${itemsInfo}
         session.order = {};
 
         // ✅ cancelar recordatorios al finalizar (NUEVO)
-        await cancelReminders(userPhone, session, "order_completed_location_received");
+        await cancelReminders(
+          userPhone,
+          session,
+          "order_completed_location_received"
+        );
+        await cancelFollowupTick(
+          userPhone,
+          session,
+          "order_completed_location_received"
+        );
 
         await setSession(userPhone, session);
         return;
@@ -949,14 +1212,6 @@ ${itemsInfo}
     console.error("❌ Error procesando inbound:", err?.response?.data || err);
   }
 }
-
-// =============================
-// ✅ HEALTH CHECK (para UptimeRobot)
-// =============================
-app.get("/health", (req, res) => {
-  res.status(200).send("ok");
-});
-
 
 // =============================
 // ✅ WEBHOOK MAIN (ACK inmediato)
