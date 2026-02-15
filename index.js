@@ -39,6 +39,185 @@ const WHATSAPP_CATALOG_URL = "https://wa.me/c/18495828578";
 const WELCOME_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 // =============================
+// ✅ FOLLOW-UP / RECORDATORIOS (NUEVO)
+// - Cada 4 horas por las primeras 24 horas (máx 6)
+// - Solo si: fue el primer mensaje y NO volvió a escribir (2do mensaje) y NO envió carrito (order)
+// =============================
+const REMINDER_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4h
+const REMINDER_MAX_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h
+const REMINDER_MAX_COUNT = 6;
+
+// Timers en memoria (por usuario). Nota: si el server se reinicia, los timers no sobreviven,
+// pero el estado queda en Redis; al re-escribir el usuario, se cancela igual.
+const reminderTimers = new Map();
+
+function clearUserReminderTimer(userPhone) {
+  const t = reminderTimers.get(String(userPhone));
+  if (t) clearTimeout(t);
+  reminderTimers.delete(String(userPhone));
+}
+
+async function cancelReminders(userPhone, session, reason = "cancel") {
+  try {
+    session = session || (await getSession(userPhone)) || {};
+    if (!session.order) session.order = {};
+    if (!session.state) session.state = "INIT";
+
+    if (!session.followup) session.followup = {};
+    session.followup.active = false;
+    session.followup.cancelled = true;
+    session.followup.cancel_reason = reason;
+    session.followup.cancelled_ts = Date.now();
+
+    clearUserReminderTimer(userPhone);
+    await setSession(userPhone, session);
+  } catch (_) {}
+}
+
+async function startRemindersIfEligible(userPhone, session) {
+  if (MANUAL_MODE) return; // si está manual, no recordatorios automáticos
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return; // sin Redis no hacemos followups persistentes
+
+  session = session || (await getSession(userPhone)) || {};
+  if (!session.order) session.order = {};
+  if (!session.state) session.state = "INIT";
+
+  // contador de mensajes entrantes del usuario
+  if (!session.inbound_text_count) session.inbound_text_count = 0;
+
+  // si ya escribió 2+ veces, no aplica
+  if (session.inbound_text_count >= 2) return;
+
+  // si ya envió carrito, no aplica
+  if (session.followup?.active === false) return;
+
+  // inicializa followup
+  if (!session.followup) session.followup = {};
+  session.followup.active = true;
+  session.followup.cancelled = false;
+  session.followup.started_ts = session.followup.started_ts || Date.now();
+  session.followup.last_sent_ts = session.followup.last_sent_ts || 0;
+  session.followup.count = session.followup.count || 0;
+
+  await setSession(userPhone, session);
+
+  // programa el próximo
+  scheduleNextReminder(userPhone);
+}
+
+async function scheduleNextReminder(userPhone) {
+  if (MANUAL_MODE) return;
+  clearUserReminderTimer(userPhone);
+
+  // Calcula delay basado en last_sent_ts (para que sea cada 4h exactas)
+  const session = (await getSession(userPhone)) || {};
+  const fu = session.followup || {};
+
+  if (!fu.active) return;
+
+  const started = fu.started_ts || Date.now();
+  const now = Date.now();
+
+  // Ventana 24h
+  if (now - started > REMINDER_MAX_WINDOW_MS) {
+    await cancelReminders(userPhone, session, "window_expired");
+    return;
+  }
+
+  // Máx 6 mensajes
+  if ((fu.count || 0) >= REMINDER_MAX_COUNT) {
+    await cancelReminders(userPhone, session, "max_count_reached");
+    return;
+  }
+
+  // Si ya escribió 2+ mensajes, cancelar
+  if ((session.inbound_text_count || 0) >= 2) {
+    await cancelReminders(userPhone, session, "user_sent_second_message");
+    return;
+  }
+
+  // Si ya llegó carrito (order), cancelar
+  if (session.order && session.order.items && Array.isArray(session.order.items) && session.order.items.length > 0) {
+    await cancelReminders(userPhone, session, "order_received");
+    return;
+  }
+
+  const last = fu.last_sent_ts || 0;
+  const nextDue = last ? last + REMINDER_INTERVAL_MS : started + REMINDER_INTERVAL_MS;
+  const delay = Math.max(1000, nextDue - now);
+
+  const timer = setTimeout(async () => {
+    try {
+      // re-check al disparar
+      let s = (await getSession(userPhone)) || {};
+      if (!s.order) s.order = {};
+      if (!s.state) s.state = "INIT";
+      if (!s.followup) s.followup = {};
+
+      // condiciones de cancelación
+      if (!s.followup.active) return;
+      if ((s.inbound_text_count || 0) >= 2) {
+        await cancelReminders(userPhone, s, "user_sent_second_message");
+        return;
+      }
+      if (s.order && s.order.items && Array.isArray(s.order.items) && s.order.items.length > 0) {
+        await cancelReminders(userPhone, s, "order_received");
+        return;
+      }
+
+      const startedTs = s.followup.started_ts || Date.now();
+      const nowTs = Date.now();
+      if (nowTs - startedTs > REMINDER_MAX_WINDOW_MS) {
+        await cancelReminders(userPhone, s, "window_expired");
+        return;
+      }
+
+      if ((s.followup.count || 0) >= REMINDER_MAX_COUNT) {
+        await cancelReminders(userPhone, s, "max_count_reached");
+        return;
+      }
+
+      // ✅ enviar recordatorio (CTA al catálogo)
+      const reminderText =
+        "👋✨ Solo paso por aquí rapidito…\n" +
+        "¿Quieres ver el catálogo y elegir tus productos? 💗";
+
+      await sendWhatsAppCtaUrl(
+        userPhone,
+        reminderText,
+        "🛍️ Ver catálogo",
+        WHATSAPP_CATALOG_URL
+      );
+
+      // log a Chatwoot (privado)
+      await sendBotToChatwoot({
+        session: s,
+        from: userPhone,
+        name: userPhone,
+        message: `BOT: Recordatorio catálogo enviado (${(s.followup.count || 0) + 1}/${REMINDER_MAX_COUNT}).`,
+      });
+
+      // actualizar estado
+      s.followup.last_sent_ts = nowTs;
+      s.followup.count = (s.followup.count || 0) + 1;
+
+      await setSession(userPhone, s);
+
+      // programa el siguiente
+      await scheduleNextReminder(userPhone);
+    } catch (e) {
+      // si falla, intentamos programar otra vez más tarde sin romper
+      console.error("❌ Error recordatorio:", e?.response?.data || e.message || e);
+      try {
+        await scheduleNextReminder(userPhone);
+      } catch (_) {}
+    }
+  }, delay);
+
+  reminderTimers.set(String(userPhone), timer);
+}
+
+// =============================
 // Helpers
 // =============================
 function onlyDigits(phone) {
@@ -481,6 +660,9 @@ async function processInboundWhatsApp(body) {
     if (!session.order) session.order = {};
     if (!session.state) session.state = "INIT";
 
+    // ✅ contador de textos entrantes (NUEVO)
+    if (typeof session.inbound_text_count !== "number") session.inbound_text_count = 0;
+
     // ✅ DEDUPE por msgId
     if (msgId && session.last_wa_msg_id === msgId) return;
     if (msgId) session.last_wa_msg_id = msgId;
@@ -504,30 +686,30 @@ async function processInboundWhatsApp(body) {
         message: userText,
       });
 
+      // ✅ cuenta este texto como mensaje del usuario (NUEVO)
+      session.inbound_text_count = (session.inbound_text_count || 0) + 1;
+
+      // ✅ Si ya escribió 2do mensaje => cancelar recordatorios (NUEVO)
+      if (session.inbound_text_count >= 2) {
+        await cancelReminders(userPhone, session, "user_sent_second_message");
+      }
+
       // ✅ modo manual: no responder
       if (MANUAL_MODE) {
         await setSession(userPhone, session);
         return;
       }
 
-      // ✅ IMPORTANTE:
-      // Ya NO mandamos recordatorio de ubicación cuando el cliente escribe texto.
-      // El pedido de ubicación se envía SOLO 1 vez cuando llega el CARRITO (order).
-      //
-      // (Esto es lo que te estaba duplicando: "Perfecto 📍 envíame ubicación" cada vez que escribían.)
-      //
-      // if (session.state === "AWAIT_LOCATION") {
-      //   await sendWhatsAppText(
-      //     userPhone,
-      //     "Perfecto 😊📍\nPara finalizar tu pedido, envíame tu ubicación (clip 📎 > Ubicación > Enviar) 💗"
-      //   );
-      //   await setSession(userPhone, session);
-      //   return;
-      // }
-
       // ✅ BIENVENIDA SOLO 1 VEZ CADA 24 HORAS
       const now = Date.now();
       const lastWelcome = session.last_welcome_ts || 0;
+
+      // ✅ Si es primer mensaje (inbound_text_count === 1), activamos recordatorios (NUEVO)
+      // (Solo se activan si no escribe un segundo mensaje y no envía carrito)
+      if (session.inbound_text_count === 1) {
+        // marca followup para recordatorios
+        await startRemindersIfEligible(userPhone, session);
+      }
 
       if (now - lastWelcome < WELCOME_COOLDOWN_MS) {
         // No envía nada (para no molestar)
@@ -577,6 +759,9 @@ async function processInboundWhatsApp(body) {
         name: customerName || userPhone,
         message: `🛒 Carrito recibido (Meta Catalog) - ${items.length} item(s)`,
       });
+
+      // ✅ Si llegó carrito => cancelar recordatorios (NUEVO)
+      await cancelReminders(userPhone, session, "order_received");
 
       if (MANUAL_MODE) {
         await setSession(userPhone, session);
@@ -731,6 +916,9 @@ ${itemsInfo}
         // reset pedido
         session.state = "INIT";
         session.order = {};
+
+        // ✅ cancelar recordatorios al finalizar (NUEVO)
+        await cancelReminders(userPhone, session, "order_completed_location_received");
 
         await setSession(userPhone, session);
         return;
