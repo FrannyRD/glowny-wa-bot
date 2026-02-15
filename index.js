@@ -951,6 +951,14 @@ ${itemsInfo}
 }
 
 // =============================
+// ✅ HEALTH CHECK (para UptimeRobot)
+// =============================
+app.get("/health", (req, res) => {
+  res.status(200).send("ok");
+});
+
+
+// =============================
 // ✅ WEBHOOK MAIN (ACK inmediato)
 // =============================
 app.post("/webhook", (req, res) => {
