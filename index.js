@@ -481,6 +481,29 @@ function normalizeText(text) {
   return normalized;
 }
 
+function safeJson(value) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch (_) {
+    return String(value);
+  }
+}
+
+function debugLog(label, data) {
+  const ts = new Date().toISOString();
+  if (typeof data === "undefined") {
+    console.log(`🔎 [${ts}] ${label}`);
+    return;
+  }
+  console.log(`🔎 [${ts}] ${label}:`, data);
+}
+
+function debugJson(label, data) {
+  const ts = new Date().toISOString();
+  console.log(`🔎 [${ts}] ${label}:
+${safeJson(data)}`);
+}
+
 // (Se mantiene por si lo usas luego)
 function isGreetingOnly(text) {
   const t = normalizeText(text);
@@ -570,9 +593,15 @@ async function waSend(payload) {
   }
 
   const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
+  debugJson("➡️ waSend payload", {
+    to: payload?.to,
+    type: payload?.type,
+    text: payload?.text,
+    interactiveType: payload?.interactive?.type,
+  });
 
   try {
-    await axios.post(
+    const response = await axios.post(
       url,
       { messaging_product: "whatsapp", ...payload },
       {
@@ -582,6 +611,8 @@ async function waSend(payload) {
         },
       }
     );
+
+    debugJson("✅ waSend response", response?.data || {});
   } catch (error) {
     console.error(
       "❌ Error enviando mensaje WhatsApp:",
@@ -741,6 +772,13 @@ async function cwGetOrCreateConversation({ session, phone, contactId }) {
 async function sendToChatwoot({ session, from, name, message }) {
   if (!chatwootEnabled()) return;
 
+  debugJson("📨 sendToChatwoot", {
+    from,
+    name,
+    cw_conversation_id: session?.cw_conversation_id || null,
+    message,
+  });
+
   try {
     const contactId = await cwGetOrCreateContact({
       phone: from,
@@ -773,6 +811,13 @@ async function sendToChatwoot({ session, from, name, message }) {
 
 async function sendBotToChatwoot({ session, from, name, message }) {
   if (!chatwootEnabled()) return;
+
+  debugJson("🤖 sendBotToChatwoot", {
+    from,
+    name,
+    cw_conversation_id: session?.cw_conversation_id || null,
+    message,
+  });
 
   try {
     const contactId = await cwGetOrCreateContact({
@@ -808,6 +853,7 @@ async function sendBotToChatwoot({ session, from, name, message }) {
 app.post("/chatwoot/webhook", async (req, res) => {
   try {
     const event = req.body;
+    debugJson("📥 /chatwoot/webhook body", event);
 
     const mt = event?.message_type;
     const isOutgoing = mt === "outgoing" || mt === 1;
@@ -831,6 +877,12 @@ app.post("/chatwoot/webhook", async (req, res) => {
     if (!phone) return res.sendStatus(200);
 
     const userPhone = onlyDigits(phone);
+    debugJson("📤 Chatwoot -> WhatsApp", {
+      phone: userPhone,
+      content,
+      senderType,
+      isOutgoing,
+    });
 
     let session = (await getSession(userPhone)) || {};
     if (!session.order) session.order = {};
@@ -838,6 +890,11 @@ app.post("/chatwoot/webhook", async (req, res) => {
 
     // ✅ pausar bot 30 min cuando el humano responde
     session.human_until = Date.now() + 30 * 60 * 1000;
+    debugJson("⏸️ human_until activado desde Chatwoot", {
+      userPhone,
+      human_until: session.human_until,
+      human_until_iso: new Date(session.human_until).toISOString(),
+    });
     await setSession(userPhone, session);
 
     await sendWhatsAppText(userPhone, content);
@@ -872,6 +929,10 @@ app.get("/health", (req, res) => {
 
 app.get("/tick", async (req, res) => {
   try {
+    debugJson("⏰ /tick llamado", {
+      hasToken: Boolean(req.query?.token),
+      query: req.query || {},
+    });
     const token = String(req.query?.token || "");
     if (!TICK_TOKEN || token !== TICK_TOKEN) return res.sendStatus(403);
 
@@ -888,14 +949,22 @@ app.get("/tick", async (req, res) => {
 // =============================
 async function processInboundWhatsApp(body) {
   try {
-    if (body.object !== "whatsapp_business_account") return;
+    debugJson("📥 processInboundWhatsApp body", body);
+
+    if (body.object !== "whatsapp_business_account") {
+      debugLog("⚠️ body.object ignorado", body?.object);
+      return;
+    }
 
     const entry = body.entry?.[0];
     const change = entry?.changes?.[0];
     const value = change?.value;
 
     const messages = value?.messages;
-    if (!messages || messages.length === 0) return;
+    if (!messages || messages.length === 0) {
+      debugJson("ℹ️ Webhook sin messages", value || {});
+      return;
+    }
 
     const msg = messages[0];
     const userPhone = msg.from;
@@ -904,20 +973,57 @@ async function processInboundWhatsApp(body) {
 
     const customerName = value?.contacts?.[0]?.profile?.name || "";
 
+    debugJson("📩 Mensaje entrante detectado", {
+      userPhone,
+      msgType,
+      msgId,
+      customerName,
+      timestamp: msg?.timestamp || null,
+    });
+
     let session = (await getSession(userPhone)) || {};
     if (!session.order) session.order = {};
     if (!session.state) session.state = "INIT";
+
+    debugJson("🧠 Sesión cargada", {
+      userPhone,
+      state: session.state,
+      human_until: session.human_until || null,
+      human_until_iso: session.human_until
+        ? new Date(session.human_until).toISOString()
+        : null,
+      inbound_text_count: session.inbound_text_count,
+      last_welcome_ts: session.last_welcome_ts || null,
+      cw_conversation_id: session.cw_conversation_id || null,
+      has_order_items: Array.isArray(session.order?.items)
+        ? session.order.items.length
+        : 0,
+    });
 
     // ✅ contador de textos entrantes (NUEVO)
     if (typeof session.inbound_text_count !== "number")
       session.inbound_text_count = 0;
 
     // ✅ DEDUPE por msgId
-    if (msgId && session.last_wa_msg_id === msgId) return;
+    if (msgId && session.last_wa_msg_id === msgId) {
+      debugJson("♻️ Mensaje duplicado ignorado", {
+        userPhone,
+        msgId,
+      });
+      return;
+    }
     if (msgId) session.last_wa_msg_id = msgId;
 
     // ✅ si humano está atendiendo, bot pausa
     if (session.human_until && Date.now() < session.human_until) {
+      debugJson("⏸️ Mensaje bloqueado por human_until", {
+        userPhone,
+        msgId,
+        now: Date.now(),
+        now_iso: new Date().toISOString(),
+        human_until: session.human_until,
+        human_until_iso: new Date(session.human_until).toISOString(),
+      });
       await setSession(userPhone, session);
       return;
     }
@@ -927,6 +1033,11 @@ async function processInboundWhatsApp(body) {
     // =============================
     if (msgType === "text") {
       const userText = msg.text?.body?.trim() || "";
+      debugJson("💬 Rama text", {
+        userPhone,
+        msgId,
+        text: userText,
+      });
 
       await sendToChatwoot({
         session,
@@ -937,6 +1048,10 @@ async function processInboundWhatsApp(body) {
 
       // ✅ cuenta este texto como mensaje del usuario (NUEVO)
       session.inbound_text_count = (session.inbound_text_count || 0) + 1;
+      debugJson("🔢 inbound_text_count actualizado", {
+        userPhone,
+        inbound_text_count: session.inbound_text_count,
+      });
 
       // ✅ Si ya escribió 2do mensaje => cancelar recordatorios (NUEVO)
       if (session.inbound_text_count >= 2) {
@@ -946,6 +1061,10 @@ async function processInboundWhatsApp(body) {
 
       // ✅ modo manual: no responder
       if (MANUAL_MODE) {
+        debugJson("🛑 MANUAL_MODE activo, no se responde automáticamente", {
+          userPhone,
+          msgId,
+        });
         await setSession(userPhone, session);
         return;
       }
@@ -953,6 +1072,15 @@ async function processInboundWhatsApp(body) {
       // ✅ BIENVENIDA SOLO 1 VEZ CADA 24 HORAS
       const now = Date.now();
       const lastWelcome = session.last_welcome_ts || 0;
+      debugJson("⏱️ Control bienvenida", {
+        userPhone,
+        now,
+        now_iso: new Date(now).toISOString(),
+        lastWelcome,
+        lastWelcome_iso: lastWelcome ? new Date(lastWelcome).toISOString() : null,
+        diff_ms: now - lastWelcome,
+        cooldown_ms: WELCOME_COOLDOWN_MS,
+      });
 
       // ✅ Si es primer mensaje (inbound_text_count === 1), activamos recordatorios (NUEVO)
       // (Solo se activan si no escribe un segundo mensaje y no envía carrito)
@@ -965,6 +1093,12 @@ async function processInboundWhatsApp(body) {
       }
 
       if (now - lastWelcome < WELCOME_COOLDOWN_MS) {
+        debugJson("⏳ Bienvenida omitida por cooldown", {
+          userPhone,
+          msgId,
+          diff_ms: now - lastWelcome,
+          cooldown_ms: WELCOME_COOLDOWN_MS,
+        });
         // No envía nada (para no molestar)
         await setSession(userPhone, session);
         return;
@@ -980,6 +1114,11 @@ async function processInboundWhatsApp(body) {
         `✅ Selecciona tus productos y cuando termines tu carrito,\n` +
         `envíame tu *ubicación* 📍 y uno de nuestros representantes se pondrá en contacto contigo 💗`;
 
+      debugJson("👋 Enviando bienvenida CTA", {
+        userPhone,
+        customerName,
+        cta: WHATSAPP_CATALOG_URL,
+      });
       await sendWhatsAppCtaUrl(
         userPhone,
         welcomeText,
@@ -1005,6 +1144,12 @@ async function processInboundWhatsApp(body) {
     if (msgType === "order") {
       const order = msg.order;
       const items = order?.product_items || [];
+      debugJson("🛒 Rama order", {
+        userPhone,
+        msgId,
+        items_count: items.length,
+        items,
+      });
 
       await sendToChatwoot({
         session,
@@ -1018,6 +1163,11 @@ async function processInboundWhatsApp(body) {
       await cancelFollowupTick(userPhone, session, "order_received");
 
       if (MANUAL_MODE) {
+        debugJson("🛑 MANUAL_MODE activo en order, no se responde automáticamente", {
+          userPhone,
+          msgId,
+          items_count: items.length,
+        });
         await setSession(userPhone, session);
         return;
       }
@@ -1063,6 +1213,10 @@ async function processInboundWhatsApp(body) {
         items: parsedItems,
         source: "META_CATALOG",
       };
+      debugJson("🧾 order parseado", {
+        userPhone,
+        parsedItems,
+      });
 
       session.state = "AWAIT_LOCATION";
 
@@ -1105,6 +1259,13 @@ async function processInboundWhatsApp(body) {
       const loc = msg.location;
       if (!loc) return;
 
+      debugJson("📍 Rama location", {
+        userPhone,
+        msgId,
+        location: loc,
+        state: session.state,
+      });
+
       const mapPreview =
         loc.latitude && loc.longitude
           ? `📍 Ubicación enviada: https://maps.google.com/?q=${loc.latitude},${loc.longitude}`
@@ -1118,6 +1279,10 @@ async function processInboundWhatsApp(body) {
       });
 
       if (MANUAL_MODE) {
+        debugJson("🛑 MANUAL_MODE activo en location, no se responde automáticamente", {
+          userPhone,
+          msgId,
+        });
         await setSession(userPhone, session);
         return;
       }
@@ -1130,6 +1295,12 @@ async function processInboundWhatsApp(body) {
           address: loc.address || "",
         };
 
+        debugJson("✅ Ubicación recibida para pedido activo", {
+          userPhone,
+          order_items_count: Array.isArray(session.order?.items)
+            ? session.order.items.length
+            : 0,
+        });
         await sendWhatsAppText(
           userPhone,
           "Perfecto 🤩 uno de nuestros representantes te estará contactando con los detalles de envíos y pagos."
@@ -1164,6 +1335,10 @@ Fuente: Catálogo Meta
 ${itemsInfo}
 📍 Ubicación: ${mapLink}`;
 
+          debugJson("📣 Enviando aviso al admin", {
+            ADMIN_PHONE,
+            adminMsg,
+          });
           await sendWhatsAppText(ADMIN_PHONE, adminMsg);
         }
 
@@ -1207,6 +1382,11 @@ ${itemsInfo}
     }
     */
 
+    debugJson("ℹ️ Tipo de mensaje no manejado explícitamente", {
+      userPhone,
+      msgType,
+      msgId,
+    });
     await setSession(userPhone, session);
   } catch (err) {
     console.error("❌ Error procesando inbound:", err?.response?.data || err);
@@ -1217,6 +1397,14 @@ ${itemsInfo}
 // ✅ WEBHOOK MAIN (ACK inmediato)
 // =============================
 app.post("/webhook", (req, res) => {
+  debugJson("📥 POST /webhook headers", {
+    "content-type": req.headers["content-type"],
+    "user-agent": req.headers["user-agent"],
+    "x-hub-signature": req.headers["x-hub-signature"] || null,
+    "x-hub-signature-256": req.headers["x-hub-signature-256"] || null,
+  });
+  debugJson("📥 POST /webhook body", req.body);
+
   res.sendStatus(200);
 
   setImmediate(() => {
@@ -1231,4 +1419,13 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Bot de Glowny Essentials escuchando en el puerto ${PORT}`);
   console.log(`🤖 MANUAL_MODE = ${MANUAL_MODE ? "ON (solo Chatwoot)" : "OFF"}`);
+  debugJson("🧩 Boot config", {
+    port: PORT,
+    chatwootEnabled: chatwootEnabled(),
+    hasUpstash: Boolean(UPSTASH_URL && UPSTASH_TOKEN),
+    hasWaToken: Boolean(WA_TOKEN),
+    hasPhoneNumberId: Boolean(PHONE_NUMBER_ID),
+    hasVerifyToken: Boolean(VERIFY_TOKEN),
+    hasTickToken: Boolean(TICK_TOKEN),
+  });
 });
