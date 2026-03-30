@@ -655,11 +655,11 @@ async function sendWhatsAppCtaUrl(to, bodyText, buttonText, url) {
 // ✅ CHATWOOT
 // =============================
 function chatwootEnabled() {
-  return (
+  return Boolean(
     CHATWOOT_BASE_URL &&
-    CHATWOOT_ACCOUNT_ID &&
-    CHATWOOT_INBOX_ID &&
-    CHATWOOT_API_TOKEN
+      CHATWOOT_ACCOUNT_ID &&
+      CHATWOOT_INBOX_ID &&
+      CHATWOOT_API_TOKEN
   );
 }
 
@@ -1065,6 +1065,37 @@ async function processInboundWhatsApp(body) {
           userPhone,
           msgId,
         });
+        await setSession(userPhone, session);
+        return;
+      }
+
+      // ✅ Si el usuario ya tiene carrito y estamos esperando ubicación,
+      // responder recordando que debe enviar la ubicación.
+      if (session.state === "AWAIT_LOCATION") {
+        debugJson("📍 Texto recibido mientras se espera ubicación", {
+          userPhone,
+          msgId,
+          text: userText,
+          order_items_count: Array.isArray(session.order?.items)
+            ? session.order.items.length
+            : 0,
+        });
+
+        await sendWhatsAppText(
+          userPhone,
+          `Tengo tu carrito pendiente 😊🛒
+Por favor envíame tu ubicación 📍 para continuar con tu pedido.
+
+Puedes hacerlo desde el clip 📎 > Ubicación > Enviar. 💗`
+        );
+
+        await sendBotToChatwoot({
+          session,
+          from: userPhone,
+          name: customerName || userPhone,
+          message: "BOT: Recordatorio de ubicación enviado porque el cliente escribió texto mientras estaba en AWAIT_LOCATION.",
+        });
+
         await setSession(userPhone, session);
         return;
       }
