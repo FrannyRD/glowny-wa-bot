@@ -2004,8 +2004,10 @@ async function processInboundWhatsApp(body) {
     });
 
     let session = (await getSession(userPhone)) || {};
+    session = ensureSessionDefaults(session);
     if (!session.order) session.order = {};
     if (!session.state) session.state = "INIT";
+    const automationBlocked = isAutomationBlocked(session);
 
     debugJson("🧠 Sesión cargada", {
       userPhone,
