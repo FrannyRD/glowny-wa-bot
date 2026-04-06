@@ -52,6 +52,7 @@ const META_GRAPH_VERSION =
   process.env.WHATSAPP_GRAPH_VERSION || process.env.META_GRAPH_VERSION || "v20.0";
 const HUMAN_MODE_NOTIFY_USER =
   String(process.env.HUMAN_MODE_NOTIFY_USER || "0") === "1";
+const DEFAULT_INBOUND_QUEUE = String(process.env.DEFAULT_INBOUND_QUEUE || "Nuevos").trim();
 
 // ✅ MODO MANUAL: Solo Chatwoot (sin respuestas automáticas)
 const MANUAL_MODE = String(process.env.MANUAL_MODE || "")
@@ -1061,6 +1062,7 @@ function isAutomationBlocked(session) {
 
 async function reportInboundToBothub({ session, from, name, msg, bodyText }) {
   const inboundMeta = extractInboundMeta(msg);
+  const defaultQueueName = String(DEFAULT_INBOUND_QUEUE || "").trim();
   const payload = {
     direction: "INBOUND",
     from: String(from || ""),
@@ -1070,7 +1072,11 @@ async function reportInboundToBothub({ session, from, name, msg, bodyText }) {
     name: name || undefined,
     kind: inboundMeta?.kind || (msg?.type ? String(msg.type).toUpperCase() : "UNKNOWN"),
     mediaUrl: inboundMeta?.mediaUrl || undefined,
-    meta: inboundMeta,
+    queue: defaultQueueName || undefined,
+    meta: {
+      ...(inboundMeta || {}),
+      queue: defaultQueueName || undefined,
+    },
   };
   debugJson("📨 reportInboundToBothub", payload);
   const ack = await bothubReportMessage(payload);
