@@ -44,6 +44,15 @@ const BOTHUB_API_BASE_URL =
 const BOTHUB_JWT_TOKEN =
   (process.env.BOTHUB_JWT_TOKEN || process.env.CRM_JWT_TOKEN || "").trim();
 const BOTHUB_BOT_ID = (process.env.BOTHUB_BOT_ID || "").trim();
+// ✅ Bandeja por defecto en el CRM para primeros mensajes entrantes.
+// Se usa solo cuando el bot aún no tiene conversación enlazada en Bothub,
+// para evitar mover conversaciones existentes de otras bandejas.
+const BOTHUB_DEFAULT_QUEUE_NAME = (
+  process.env.BOTHUB_DEFAULT_QUEUE_NAME ||
+  process.env.BOTHUB_QUEUE_NAME ||
+  process.env.CRM_DEFAULT_QUEUE_NAME ||
+  "Nuevos"
+).trim();
 const BOT_PUBLIC_BASE_URL = (process.env.BOT_PUBLIC_BASE_URL || "").replace(/\/$/, "");
 const HUB_MEDIA_SECRET =
   (process.env.HUB_MEDIA_SECRET || BOTHUB_WEBHOOK_SECRET || VERIFY_TOKEN || "").trim();
@@ -1059,8 +1068,25 @@ function isAutomationBlocked(session) {
   );
 }
 
+function shouldAttachDefaultBothubQueue(session) {
+  if (!BOTHUB_DEFAULT_QUEUE_NAME) return false;
+
+  // Si ya Bothub devolvió conversationId, no enviamos queue para no mover
+  // conversaciones existentes a Nuevos accidentalmente.
+  if (session?.hubConversationId) return false;
+
+  // Evita repetir el queue en la misma sesión después del primer enlace.
+  if (session?.bothub_initial_queue_reported === true) return false;
+
+  return true;
+}
+
 async function reportInboundToBothub({ session, from, name, msg, bodyText }) {
   const inboundMeta = extractInboundMeta(msg);
+  const defaultQueueName = shouldAttachDefaultBothubQueue(session)
+    ? BOTHUB_DEFAULT_QUEUE_NAME
+    : "";
+
   const payload = {
     direction: "INBOUND",
     from: String(from || ""),
@@ -1069,13 +1095,25 @@ async function reportInboundToBothub({ session, from, name, msg, bodyText }) {
     waMessageId: msg?.id,
     name: name || undefined,
     kind: inboundMeta?.kind || (msg?.type ? String(msg.type).toUpperCase() : "UNKNOWN"),
+    queue: defaultQueueName || undefined,
+    queueName: defaultQueueName || undefined,
     mediaUrl: inboundMeta?.mediaUrl || undefined,
-    meta: inboundMeta,
+    meta: {
+      ...inboundMeta,
+      queue: defaultQueueName || undefined,
+      queueName: defaultQueueName || undefined,
+    },
   };
   debugJson("📨 reportInboundToBothub", payload);
   const ack = await bothubReportMessage(payload);
   debugJson("🧾 Bothub inbound ack", ack || {});
   updateSessionHubConversationId(session, ack);
+
+  if (defaultQueueName && (ack || session?.hubConversationId)) {
+    session.bothub_initial_queue_reported = true;
+    session.bothub_initial_queue_name = defaultQueueName;
+    session.bothub_initial_queue_ts = Date.now();
+  }
   if (session?.hubConversationId) {
     debugJson("🧵 hubConversationId actualizada", {
       hubConversationId: session.hubConversationId,
@@ -1198,6 +1236,120 @@ function lookupProductByRetailerId(retailerId) {
     null;
 
   return found?.data || null;
+}
+
+// ✅ Mapa de anuncios -> productos.
+// Meta no siempre envía product_retailer_id en anuncios Click-to-WhatsApp;
+// a veces solo envía referral.source_id + texto del anuncio.
+// Este mapa permite reconocer el producto exacto sin depender de frases genéricas.
+const DEFAULT_AD_PRODUCT_MAP = {
+  // Anuncio: Colágeno con magnesio y vitamina C | RD$1,100
+  "52559485041538": {
+    productId: "5161a1bf-a837-4d3f-a589-d1987aea4c91",
+    aliases: [
+      "colageno con magnesio y vitamina c",
+      "colágeno con magnesio y vitamina c",
+      "colageno magnesio vitamina c",
+      "colágeno magnesio vitamina c",
+      "colageno rd 1100",
+      "glowup colageno",
+    ],
+  },
+};
+
+function parseAdProductMapEnv() {
+  const raw = String(process.env.AD_PRODUCT_MAP_JSON || "").trim();
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (e) {
+    console.error("⚠️ AD_PRODUCT_MAP_JSON inválido:", e?.message || e);
+    return {};
+  }
+}
+
+const AD_PRODUCT_MAP = {
+  ...DEFAULT_AD_PRODUCT_MAP,
+  ...parseAdProductMapEnv(),
+};
+
+function normalizeAdMapEntry(entry) {
+  if (!entry) return null;
+  if (typeof entry === "string") return { productId: entry, aliases: [] };
+  if (typeof entry !== "object") return null;
+
+  return {
+    productId:
+      entry.productId ||
+      entry.product_id ||
+      entry.id ||
+      entry.meta_id ||
+      entry.retailerId ||
+      entry.retailer_id ||
+      "",
+    aliases: Array.isArray(entry.aliases) ? entry.aliases : [],
+  };
+}
+
+function lookupProductByAdMap(msg, signalSummary) {
+  const sourceIds = uniqueNonEmptyStrings([
+    msg?.referral?.source_id,
+    msg?.referral?.sourceId,
+    msg?.referral?.ad_id,
+    msg?.referral?.adId,
+  ]);
+
+  for (const sourceId of sourceIds) {
+    const entry = normalizeAdMapEntry(AD_PRODUCT_MAP[sourceId]);
+    if (!entry?.productId) continue;
+
+    const mappedProduct =
+      lookupProductByRetailerId(entry.productId) ||
+      productIndex.find((p) => String(p.data.id) === String(entry.productId))?.data ||
+      null;
+
+    if (mappedProduct) {
+      return {
+        product: mappedProduct,
+        matchedBy: "ad_source_id",
+        matchedValue: sourceId,
+      };
+    }
+  }
+
+  const candidateTexts = (signalSummary?.textCandidates || [])
+    .map((value) => normalizeMatchText(value))
+    .filter(Boolean);
+
+  if (!candidateTexts.length) return null;
+
+  for (const [sourceId, rawEntry] of Object.entries(AD_PRODUCT_MAP)) {
+    const entry = normalizeAdMapEntry(rawEntry);
+    if (!entry?.productId || !Array.isArray(entry.aliases) || !entry.aliases.length) continue;
+
+    const aliases = entry.aliases.map((alias) => normalizeMatchText(alias)).filter(Boolean);
+    const aliasMatched = aliases.some((alias) => {
+      return candidateTexts.some((text) => text.includes(alias) || alias.includes(text));
+    });
+
+    if (!aliasMatched) continue;
+
+    const mappedProduct =
+      lookupProductByRetailerId(entry.productId) ||
+      productIndex.find((p) => String(p.data.id) === String(entry.productId))?.data ||
+      null;
+
+    if (mappedProduct) {
+      return {
+        product: mappedProduct,
+        matchedBy: "ad_alias",
+        matchedValue: sourceId,
+      };
+    }
+  }
+
+  return null;
 }
 
 function scoreCatalogProductCandidate(candidateText, product) {
@@ -1418,6 +1570,15 @@ function extractAdProductContext(msg, session, userText = "") {
       matchedBy = "retailer_id";
       matchedValue = retailerId;
       break;
+    }
+  }
+
+  if (!product) {
+    const mappedMatch = lookupProductByAdMap(msg, signalSummary);
+    if (mappedMatch?.product) {
+      product = mappedMatch.product;
+      matchedBy = mappedMatch.matchedBy;
+      matchedValue = mappedMatch.matchedValue;
     }
   }
 
@@ -2582,6 +2743,12 @@ Puedes hacerlo desde el clip 📎 > Ubicación > Enviar. 💗`
 
       session.last_welcome_ts = now;
 
+      const adProductLine = referredProduct?.name
+        ? (typeof referredProduct.price === "number" && !Number.isNaN(referredProduct.price)
+            ? `Veo que vienes por *${referredProduct.name}* ✨\nSu precio es *RD$${referredProduct.price}*.\n\n`
+            : `Veo que vienes por *${referredProduct.name}* ✨\n\n`)
+        : "";
+
       const welcomeText =
         `🤖 ¡Hola${greetingName}! Soy el asistente automático de Glowny Essentials 💕
 
@@ -2589,6 +2756,7 @@ Puedes hacerlo desde el clip 📎 > Ubicación > Enviar. 💗`
         `Estoy aquí para ayudarte a realizar tu pedido paso a paso.
 
 ` +
+        adProductLine +
         `🛍️ Para comprar:
 ` +
         `1️⃣ Abre nuestro *Catálogo de WhatsApp*.
