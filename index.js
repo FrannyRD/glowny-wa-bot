@@ -1233,6 +1233,7 @@ function lookupProductByAdTexts(texts) {
   let bestProduct = null;
   let bestScore = 0;
   let secondScore = 0;
+  let bestText = "";
 
   for (const entry of productIndex) {
     for (const candidateText of cleanTexts) {
@@ -1241,6 +1242,7 @@ function lookupProductByAdTexts(texts) {
         secondScore = bestScore;
         bestScore = score;
         bestProduct = entry.data;
+        bestText = candidateText;
       } else if (score > secondScore) {
         secondScore = score;
       }
@@ -1251,10 +1253,148 @@ function lookupProductByAdTexts(texts) {
   if (bestScore < 36) return null;
   if (secondScore && bestScore - secondScore < 8) return null;
 
-  return bestProduct;
+  return {
+    product: bestProduct,
+    score: bestScore,
+    bestText,
+  };
 }
 
-function extractAdProductContext(msg, session) {
+function uniqueNonEmptyStrings(values) {
+  const seen = new Set();
+  const out = [];
+
+  for (const value of Array.isArray(values) ? values : []) {
+    const text = String(value || "").trim();
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+  }
+
+  return out;
+}
+
+function collectScalarStringsDeep(input, out = [], seen = new Set()) {
+  if (!input) return out;
+  if (seen.has(input)) return out;
+
+  if (typeof input === "string" || typeof input === "number") {
+    out.push(String(input));
+    return out;
+  }
+
+  if (Array.isArray(input)) {
+    seen.add(input);
+    for (const item of input) collectScalarStringsDeep(item, out, seen);
+    return out;
+  }
+
+  if (typeof input === "object") {
+    seen.add(input);
+    for (const value of Object.values(input)) collectScalarStringsDeep(value, out, seen);
+  }
+
+  return out;
+}
+
+function extractUrlSignalTexts(rawUrl) {
+  const urlValue = String(rawUrl || "").trim();
+  if (!urlValue) return [];
+
+  const collected = [];
+
+  try {
+    const parsed = new URL(urlValue);
+
+    parsed.pathname
+      .split("/")
+      .map((segment) => decodeURIComponent(segment || "").replace(/[-_]+/g, " ").trim())
+      .filter(Boolean)
+      .forEach((segment) => collected.push(segment));
+
+    for (const [key, value] of parsed.searchParams.entries()) {
+      const normalizedKey = normalizeMatchText(key);
+      const stringValue = String(value || "").trim();
+      if (!stringValue) continue;
+
+      if (
+        ["product", "item", "title", "headline", "body", "text", "name", "sku", "id"]
+          .some((token) => normalizedKey.includes(token))
+      ) {
+        collected.push(decodeURIComponent(stringValue).replace(/[-_]+/g, " "));
+      }
+    }
+  } catch (_) {
+    collected.push(urlValue.replace(/[-_]+/g, " "));
+  }
+
+  return uniqueNonEmptyStrings(collected);
+}
+
+function looksLikeCatalogId(value) {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)) {
+    return true;
+  }
+  return productIndex.some((p) => {
+    return String(p.data.id || "") === text || String(p.data.meta_id || "") === text;
+  });
+}
+
+function buildAdSignalSummary(msg, session, userText = "") {
+  const currentSession = session && typeof session === "object" ? session : {};
+  const storedContext =
+    currentSession.ad_context && typeof currentSession.ad_context === "object"
+      ? currentSession.ad_context
+      : null;
+
+  const nestedReferralStrings = collectScalarStringsDeep(msg?.referral || null);
+  const nestedContextStrings = collectScalarStringsDeep(msg?.context || null);
+  const userTextTrimmed = String(userText || "").trim();
+  const genericUserText = !userTextTrimmed || isPriceInquiryText(userTextTrimmed) || isGreetingOnly(userTextTrimmed);
+
+  const retailerCandidates = uniqueNonEmptyStrings([
+    msg?.context?.referred_product?.product_retailer_id,
+    msg?.context?.referred_product?.retailer_id,
+    msg?.context?.product_retailer_id,
+    msg?.context?.product_id,
+    msg?.referral?.referred_product?.product_retailer_id,
+    msg?.referral?.product_retailer_id,
+    msg?.referral?.product_id,
+    storedContext?.referred_product?.product_retailer_id,
+    storedContext?.product?.id,
+    ...nestedReferralStrings.filter(looksLikeCatalogId),
+    ...nestedContextStrings.filter(looksLikeCatalogId),
+  ]);
+
+  const textCandidates = uniqueNonEmptyStrings([
+    msg?.referral?.headline,
+    msg?.referral?.body,
+    msg?.context?.title,
+    msg?.context?.body,
+    storedContext?.referral?.headline,
+    storedContext?.referral?.body,
+    storedContext?.product?.name,
+    ...extractUrlSignalTexts(msg?.referral?.source_url),
+    ...nestedReferralStrings,
+    ...nestedContextStrings,
+    ...(genericUserText ? [] : [userTextTrimmed]),
+  ]).filter((value) => String(value || "").trim().length >= 3);
+
+  return {
+    hasReferral: Boolean(msg?.referral),
+    hasReferredProduct: Boolean(msg?.context?.referred_product || msg?.referral?.referred_product),
+    retailerCandidates,
+    textCandidates,
+    textCandidatesPreview: textCandidates.slice(0, 6),
+    storedProductId: storedContext?.product?.id || null,
+  };
+}
+
+function extractAdProductContext(msg, session, userText = "") {
   const currentSession = session && typeof session === "object" ? session : {};
   const storedContext =
     currentSession.ad_context && typeof currentSession.ad_context === "object"
@@ -1266,33 +1406,28 @@ function extractAdProductContext(msg, session) {
     msg?.referral?.referred_product ||
     null;
 
-  const retailerCandidates = [
-    referredProduct?.product_retailer_id,
-    msg?.referral?.product_retailer_id,
-    msg?.referral?.product_id,
-  ]
-    .map((value) => String(value || "").trim())
-    .filter(Boolean);
+  const signalSummary = buildAdSignalSummary(msg, session, userText);
 
   let product = null;
   let matchedBy = null;
+  let matchedValue = null;
 
-  for (const retailerId of retailerCandidates) {
+  for (const retailerId of signalSummary.retailerCandidates) {
     product = lookupProductByRetailerId(retailerId);
     if (product) {
       matchedBy = "retailer_id";
+      matchedValue = retailerId;
       break;
     }
   }
 
   if (!product) {
-    product = lookupProductByAdTexts([
-      msg?.referral?.headline,
-      msg?.referral?.body,
-      storedContext?.referral?.headline,
-      storedContext?.referral?.body,
-    ]);
-    if (product) matchedBy = "referral_text";
+    const textMatch = lookupProductByAdTexts(signalSummary.textCandidates);
+    if (textMatch?.product) {
+      product = textMatch.product;
+      matchedBy = "referral_text";
+      matchedValue = textMatch.bestText || null;
+    }
   }
 
   if (!product && storedContext?.product?.id) {
@@ -1302,7 +1437,10 @@ function extractAdProductContext(msg, session) {
         productIndex.find((p) => String(p.data.id) === String(storedContext.product.id))
           ?.data || null;
     }
-    if (product) matchedBy = "session_cache";
+    if (product) {
+      matchedBy = "session_cache";
+      matchedValue = storedContext.product.id;
+    }
   }
 
   if (!product) return storedContext || null;
@@ -1314,6 +1452,7 @@ function extractAdProductContext(msg, session) {
         ? "referred_product"
         : storedContext?.source || "session_cache",
     matchedBy,
+    matchedValue,
     captured_at: Date.now(),
     referral: {
       source_type: msg?.referral?.source_type,
@@ -1326,6 +1465,12 @@ function extractAdProductContext(msg, session) {
     referred_product: {
       catalog_id: referredProduct?.catalog_id,
       product_retailer_id: referredProduct?.product_retailer_id,
+    },
+    detection: {
+      hasReferral: signalSummary.hasReferral,
+      hasReferredProduct: signalSummary.hasReferredProduct,
+      retailerCandidates: signalSummary.retailerCandidates.slice(0, 8),
+      textCandidatesPreview: signalSummary.textCandidatesPreview,
     },
     product: {
       id: product.id,
@@ -2224,17 +2369,40 @@ async function processInboundWhatsApp(body) {
     // =============================
     if (msgType === "text") {
       const userText = msg.text?.body?.trim() || "";
-      const adProductContext = extractAdProductContext(msg, session);
+      const adSignalSummary = buildAdSignalSummary(msg, session, userText);
+      debugJson("🧭 Resumen detección publicidad", {
+        userPhone,
+        msgId,
+        hasReferral: adSignalSummary.hasReferral,
+        hasReferredProduct: adSignalSummary.hasReferredProduct,
+        retailerCandidates: adSignalSummary.retailerCandidates,
+        textCandidatesPreview: adSignalSummary.textCandidatesPreview,
+        storedProductId: adSignalSummary.storedProductId,
+      });
+
+      const adProductContext = extractAdProductContext(msg, session, userText);
       if (adProductContext) {
         session.ad_context = adProductContext;
         debugJson("🎯 Contexto de producto por publicidad detectado", {
           userPhone,
           msgId,
           matchedBy: adProductContext.matchedBy || null,
+          matchedValue: adProductContext.matchedValue || null,
           source: adProductContext.source || null,
           product: adProductContext.product || null,
           referral: adProductContext.referral || null,
           referred_product: adProductContext.referred_product || null,
+          detection: adProductContext.detection || null,
+        });
+      } else {
+        debugJson("⚪ Producto publicidad no identificado", {
+          userPhone,
+          msgId,
+          priceIntent: isPriceInquiryText(userText),
+          hasReferral: adSignalSummary.hasReferral,
+          hasReferredProduct: adSignalSummary.hasReferredProduct,
+          retailerCandidates: adSignalSummary.retailerCandidates,
+          textCandidatesPreview: adSignalSummary.textCandidatesPreview,
         });
       }
 
