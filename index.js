@@ -52,7 +52,6 @@ const META_GRAPH_VERSION =
   process.env.WHATSAPP_GRAPH_VERSION || process.env.META_GRAPH_VERSION || "v20.0";
 const HUMAN_MODE_NOTIFY_USER =
   String(process.env.HUMAN_MODE_NOTIFY_USER || "0") === "1";
-const DEFAULT_INBOUND_QUEUE = String(process.env.DEFAULT_INBOUND_QUEUE || "Nuevos").trim();
 
 // ✅ MODO MANUAL: Solo Chatwoot (sin respuestas automáticas)
 const MANUAL_MODE = String(process.env.MANUAL_MODE || "")
@@ -1062,7 +1061,6 @@ function isAutomationBlocked(session) {
 
 async function reportInboundToBothub({ session, from, name, msg, bodyText }) {
   const inboundMeta = extractInboundMeta(msg);
-  const defaultQueueName = String(DEFAULT_INBOUND_QUEUE || "").trim();
   const payload = {
     direction: "INBOUND",
     from: String(from || ""),
@@ -1072,11 +1070,7 @@ async function reportInboundToBothub({ session, from, name, msg, bodyText }) {
     name: name || undefined,
     kind: inboundMeta?.kind || (msg?.type ? String(msg.type).toUpperCase() : "UNKNOWN"),
     mediaUrl: inboundMeta?.mediaUrl || undefined,
-    queue: defaultQueueName || undefined,
-    meta: {
-      ...(inboundMeta || {}),
-      queue: defaultQueueName || undefined,
-    },
+    meta: inboundMeta,
   };
   debugJson("📨 reportInboundToBothub", payload);
   const ack = await bothubReportMessage(payload);
@@ -1183,6 +1177,186 @@ const productIndex = catalog.map((prod) => {
     data: prod,
   };
 });
+
+function normalizeMatchText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function lookupProductByRetailerId(retailerId) {
+  const normalizedId = String(retailerId || "").trim();
+  if (!normalizedId) return null;
+
+  const found =
+    productIndex.find((p) => String(p.data.id) === normalizedId) ||
+    productIndex.find((p) => String(p.data.meta_id || "") === normalizedId) ||
+    null;
+
+  return found?.data || null;
+}
+
+function scoreCatalogProductCandidate(candidateText, product) {
+  const candidate = normalizeMatchText(candidateText);
+  const productName = normalizeMatchText(product?.name);
+
+  if (!candidate || !productName) return 0;
+
+  let score = 0;
+
+  if (candidate === productName) score += 100;
+  if (productName.includes(candidate) || candidate.includes(productName)) score += 80;
+
+  const productTokens = new Set(productName.split(" ").filter((token) => token.length >= 3));
+  const candidateTokens = [
+    ...new Set(candidate.split(" ").filter((token) => token.length >= 3)),
+  ];
+
+  const overlap = candidateTokens.filter((token) => productTokens.has(token));
+  score += overlap.length * 12;
+
+  if (candidateTokens.length && overlap.length === candidateTokens.length) score += 15;
+  if (overlap.length >= 4) score += 20;
+
+  return score;
+}
+
+function lookupProductByAdTexts(texts) {
+  const cleanTexts = (Array.isArray(texts) ? texts : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  let bestProduct = null;
+  let bestScore = 0;
+  let secondScore = 0;
+
+  for (const entry of productIndex) {
+    for (const candidateText of cleanTexts) {
+      const score = scoreCatalogProductCandidate(candidateText, entry.data);
+      if (score > bestScore) {
+        secondScore = bestScore;
+        bestScore = score;
+        bestProduct = entry.data;
+      } else if (score > secondScore) {
+        secondScore = score;
+      }
+    }
+  }
+
+  if (!bestProduct) return null;
+  if (bestScore < 36) return null;
+  if (secondScore && bestScore - secondScore < 8) return null;
+
+  return bestProduct;
+}
+
+function extractAdProductContext(msg, session) {
+  const currentSession = session && typeof session === "object" ? session : {};
+  const storedContext =
+    currentSession.ad_context && typeof currentSession.ad_context === "object"
+      ? currentSession.ad_context
+      : null;
+
+  const referredProduct =
+    msg?.context?.referred_product ||
+    msg?.referral?.referred_product ||
+    null;
+
+  const retailerCandidates = [
+    referredProduct?.product_retailer_id,
+    msg?.referral?.product_retailer_id,
+    msg?.referral?.product_id,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  let product = null;
+  let matchedBy = null;
+
+  for (const retailerId of retailerCandidates) {
+    product = lookupProductByRetailerId(retailerId);
+    if (product) {
+      matchedBy = "retailer_id";
+      break;
+    }
+  }
+
+  if (!product) {
+    product = lookupProductByAdTexts([
+      msg?.referral?.headline,
+      msg?.referral?.body,
+      storedContext?.referral?.headline,
+      storedContext?.referral?.body,
+    ]);
+    if (product) matchedBy = "referral_text";
+  }
+
+  if (!product && storedContext?.product?.id) {
+    product = lookupProductByRetailerId(storedContext.product.id);
+    if (!product) {
+      product =
+        productIndex.find((p) => String(p.data.id) === String(storedContext.product.id))
+          ?.data || null;
+    }
+    if (product) matchedBy = "session_cache";
+  }
+
+  if (!product) return storedContext || null;
+
+  return removeUndefinedDeep({
+    source: msg?.referral
+      ? "ctwa_referral"
+      : referredProduct
+        ? "referred_product"
+        : storedContext?.source || "session_cache",
+    matchedBy,
+    captured_at: Date.now(),
+    referral: {
+      source_type: msg?.referral?.source_type,
+      source_id: msg?.referral?.source_id,
+      source_url: msg?.referral?.source_url,
+      headline: msg?.referral?.headline,
+      body: msg?.referral?.body,
+      ctwa_clid: msg?.referral?.ctwa_clid,
+    },
+    referred_product: {
+      catalog_id: referredProduct?.catalog_id,
+      product_retailer_id: referredProduct?.product_retailer_id,
+    },
+    product: {
+      id: product.id,
+      meta_id: product.meta_id,
+      name: product.name,
+      price: product.price,
+      category: product.category,
+      type: product.type,
+    },
+  });
+}
+
+function isPriceInquiryText(text) {
+  const normalized = normalizeMatchText(text);
+  if (!normalized) return false;
+
+  return [
+    "precio",
+    "precio ?",
+    "que precio",
+    "que precio tiene",
+    "cual es el precio",
+    "cuanto cuesta",
+    "cuanto vale",
+    "valor",
+    "costo",
+  ].some((phrase) => {
+    const normalizedPhrase = normalizeMatchText(phrase);
+    return normalized === normalizedPhrase || normalized.includes(normalizedPhrase);
+  });
+}
 
 // =============================
 // UPSTASH (sesión)
@@ -2050,6 +2224,20 @@ async function processInboundWhatsApp(body) {
     // =============================
     if (msgType === "text") {
       const userText = msg.text?.body?.trim() || "";
+      const adProductContext = extractAdProductContext(msg, session);
+      if (adProductContext) {
+        session.ad_context = adProductContext;
+        debugJson("🎯 Contexto de producto por publicidad detectado", {
+          userPhone,
+          msgId,
+          matchedBy: adProductContext.matchedBy || null,
+          source: adProductContext.source || null,
+          product: adProductContext.product || null,
+          referral: adProductContext.referral || null,
+          referred_product: adProductContext.referred_product || null,
+        });
+      }
+
       debugJson("💬 Rama text", {
         userPhone,
         msgId,
@@ -2132,6 +2320,9 @@ Puedes hacerlo desde el clip 📎 > Ubicación > Enviar. 💗`
       // ✅ BIENVENIDA SOLO 1 VEZ CADA 24 HORAS
       const now = Date.now();
       const lastWelcome = session.last_welcome_ts || 0;
+      const greetingName = customerName ? ` ${customerName}` : "";
+      const priceIntent = isPriceInquiryText(userText);
+      const referredProduct = session.ad_context?.product || null;
       debugJson("⏱️ Control bienvenida", {
         userPhone,
         now,
@@ -2140,6 +2331,8 @@ Puedes hacerlo desde el clip 📎 > Ubicación > Enviar. 💗`
         lastWelcome_iso: lastWelcome ? new Date(lastWelcome).toISOString() : null,
         diff_ms: now - lastWelcome,
         cooldown_ms: WELCOME_COOLDOWN_MS,
+        priceIntent,
+        adProductDetected: Boolean(referredProduct?.id || referredProduct?.name),
       });
 
       // ✅ Si es primer mensaje (inbound_text_count === 1), activamos recordatorios (NUEVO)
@@ -2150,6 +2343,61 @@ Puedes hacerlo desde el clip 📎 > Ubicación > Enviar. 💗`
 
         // (Se mantiene el método viejo, pero al marcar use_tick, no correrá timers)
         await startRemindersIfEligible(userPhone, session);
+      }
+
+      if (priceIntent && referredProduct?.name) {
+        const priceLine =
+          typeof referredProduct.price === "number" && !Number.isNaN(referredProduct.price)
+            ? `El precio de *${referredProduct.name}* es *RD$${referredProduct.price}*.`
+            : `Tengo identificado que vienes interesado(a) en *${referredProduct.name}*, pero ahora mismo no tengo el precio cargado para enviártelo por aquí.`;
+
+        const priceWelcomeText =
+          `🤖 ¡Hola${greetingName}! Soy el asistente automático de Glowny Essentials 💕
+
+` +
+          `${priceLine}
+
+` +
+          `🛍️ Para comprar:
+` +
+          `1️⃣ Abre nuestro *Catálogo de WhatsApp*.
+` +
+          `2️⃣ Selecciona los productos que deseas.
+` +
+          `3️⃣ Envía tu carrito por aquí.
+` +
+          `4️⃣ Luego compártenos tu *ubicación* 📍 para coordinar la entrega.
+
+` +
+          `✅ Cuando recibamos tu carrito y ubicación, una representante revisará tu pedido y te contactará para confirmar disponibilidad, total y entrega.
+
+` +
+          `💬 No necesitas esperar respuesta manual para empezar. Puedes hacer tu pedido directamente desde el catálogo.`;
+
+        session.last_welcome_ts = now;
+
+        debugJson("💸 Respuesta de precio desde publicidad", {
+          userPhone,
+          msgId,
+          product: referredProduct,
+          cta: WHATSAPP_CATALOG_URL,
+        });
+        await sendWhatsAppCtaUrl(
+          userPhone,
+          priceWelcomeText,
+          "🛍️ Ver catálogo",
+          WHATSAPP_CATALOG_URL
+        );
+
+        await sendBotToChatwoot({
+          session,
+          from: userPhone,
+          name: customerName || userPhone,
+          message: `BOT: Precio enviado por producto detectado desde publicidad (${referredProduct.name}).`,
+        });
+
+        await setSession(userPhone, session);
+        return;
       }
 
       if (now - lastWelcome < WELCOME_COOLDOWN_MS) {
@@ -2166,13 +2414,28 @@ Puedes hacerlo desde el clip 📎 > Ubicación > Enviar. 💗`
 
       session.last_welcome_ts = now;
 
-      const greetingName = customerName ? ` ${customerName}` : "";
       const welcomeText =
-        `¡Hola${greetingName}! 😊✨\n` +
-        `Bienvenida a Glowny Essentials 💗\n\n` +
-        `🛍️ Puedes hacer tu pedido fácil desde nuestro *Catálogo de WhatsApp*.\n` +
-        `✅ Selecciona tus productos y cuando termines tu carrito,\n` +
-        `envíame tu *ubicación* 📍 y uno de nuestros representantes se pondrá en contacto contigo 💗`;
+        `🤖 ¡Hola${greetingName}! Soy el asistente automático de Glowny Essentials 💕
+
+` +
+        `Estoy aquí para ayudarte a realizar tu pedido paso a paso.
+
+` +
+        `🛍️ Para comprar:
+` +
+        `1️⃣ Abre nuestro *Catálogo de WhatsApp*.
+` +
+        `2️⃣ Selecciona los productos que deseas.
+` +
+        `3️⃣ Envía tu carrito por aquí.
+` +
+        `4️⃣ Luego compártenos tu *ubicación* 📍 para coordinar la entrega.
+
+` +
+        `✅ Cuando recibamos tu carrito y ubicación, una representante revisará tu pedido y te contactará para confirmar disponibilidad, total y entrega.
+
+` +
+        `💬 No necesitas esperar respuesta manual para empezar. Puedes hacer tu pedido directamente desde el catálogo.`;
 
       debugJson("👋 Enviando bienvenida CTA", {
         userPhone,
