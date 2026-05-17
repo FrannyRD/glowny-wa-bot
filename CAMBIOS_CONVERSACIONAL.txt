@@ -1,0 +1,16 @@
+Glowny Bot - Versión conversacional
+
+Cambios aplicados sin eliminar ni reducir flujos existentes:
+- Modo conversacional activado por defecto con CONVERSATIONAL_MODE=true.
+- Respuestas naturales para precio, disponibilidad, compra, catálogo, entrega, pago, uso, ingredientes, advertencias y duración.
+- Detección de productos por texto del cliente + contexto de publicidad guardado.
+- Respuestas con CTA al catálogo cuando aplica.
+- Mantiene carrito Meta, solicitud de ubicación, aviso admin, Chatwoot, CRM/Bothub, recordatorios, modo humano/bot, media y logs.
+- Fallback con OpenAI si OPENAI_API_KEY existe y CONVERSATIONAL_AI_ENABLED=true; si falla, el bot responde con reglas seguras.
+- Si el cliente pide humano o reporta un problema, el bot responde y pausa la automatización para representante.
+
+Variables nuevas opcionales:
+CONVERSATIONAL_MODE=true|false
+CONVERSATIONAL_AI_ENABLED=true|false
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_TIMEOUT_MS=6500
