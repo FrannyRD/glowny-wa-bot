@@ -14,11 +14,3 @@ CONVERSATIONAL_MODE=true|false
 CONVERSATIONAL_AI_ENABLED=true|false
 OPENAI_MODEL=gpt-4o-mini
 OPENAI_TIMEOUT_MS=6500
-
-Mejoras humanizadas aplicadas en esta versión:
-- Bienvenida más corta y natural, sin enviar todo el flujo completo desde el primer mensaje.
-- Si el cliente pregunta qué venden o qué otros productos tienen, el bot responde de forma directa y entrega el catálogo con CTA.
-- Si el cliente responde "sí" después de una oferta de catálogo, el bot ahora entiende el contexto y envía el catálogo, en vez de pedir otra vez productos/carrito.
-- Respuestas de precio y disponibilidad más breves, tipo asesora, manteniendo el CTA al catálogo.
-- Fallback más seguro: no usa IA abierta cuando no hay producto o contexto claro, para evitar respuestas fuera de lugar.
-- Se mantiene intacto el flujo de carrito, ubicación, CRM/Bothub, Chatwoot, recordatorios, media, publicidad y modo humano/bot.

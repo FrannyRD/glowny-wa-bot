@@ -1,0 +1,10 @@
+Cambios aplicados en esta versión:
+
+- Se corrigió el silencio cuando el cliente escribía saludos como "Hola" después del cooldown de bienvenida.
+- La bienvenida ahora es corta, natural y conversacional; ya no suelta todo el flujo completo al inicio.
+- Se agregó detección de respuestas afirmativas como "sí", "ok", "dale", "perfecto", "envíamelo" para continuar la conversación correctamente.
+- Si el cliente pregunta "qué venden", "qué otras cosas venden" o "qué más tienen", responde con catálogo de forma natural.
+- Si el cliente responde "Sí" luego de pedir catálogo u opciones, envía el catálogo directamente y no vuelve a pedir productos.
+- Se suavizaron las respuestas de precio, disponibilidad y coincidencias de productos para que se sientan más humanas.
+- Se mantiene intacto el flujo de carrito, ubicación, Chatwoot, CRM/Bothub, recordatorios, modo humano/bot, media, logs y detección de publicidad.
+- Validado con node --check.

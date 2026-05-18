@@ -1721,59 +1721,31 @@ function isThanksText(text) {
   ]);
 }
 
-
 function isAffirmativeText(text) {
-  const normalized = normalizeMatchText(text);
-  if (!normalized) return false;
+  const t = normalizeMatchText(text);
+  if (!t) return false;
+  const words = t.split(" ").filter(Boolean);
+  if (words.length > 4) return false;
 
-  const exactAffirmatives = new Set([
+  return [
     "si",
     "sí",
     "sii",
     "siii",
-    "claro",
-    "dale",
     "ok",
     "okay",
+    "dale",
+    "claro",
     "perfecto",
-    "esta bien",
-    "está bien",
-    "envialo",
-    "envíalo",
-    "mandalo",
-    "mándalo",
-    "quiero verlo",
-    "pasamelo",
-    "pásamelo",
-    "si por favor",
-    "sí por favor",
-    "claro por favor",
-    "dale si",
-    "dale sí",
-  ].map((value) => normalizeMatchText(value)));
-
-  return exactAffirmatives.has(normalized);
-}
-
-function isNegativeText(text) {
-  const normalized = normalizeMatchText(text);
-  if (!normalized) return false;
-  const exactNegatives = new Set([
-    "no",
-    "no gracias",
-    "ahora no",
-    "todavia no",
-    "todavía no",
-  ].map((value) => normalizeMatchText(value)));
-  return exactNegatives.has(normalized);
-}
-
-function clearPendingConversationActionPatch() {
-  return {
-    pending_action: null,
-    pending_action_ts: null,
-    pending_action_meta: null,
-  };
+    "asi es",
+    "así es",
+    "correcto",
+    "por favor",
+    "mandamelo",
+    "mándamelo",
+    "enviamelo",
+    "envíamelo",
+  ].some((phrase) => t === normalizeMatchText(phrase));
 }
 
 function isCatalogIntentText(text) {
@@ -1782,34 +1754,30 @@ function isCatalogIntentText(text) {
     "catálogo",
     "ver catalogo",
     "ver catálogo",
-    "catalogo completo",
-    "catálogo completo",
     "menu",
     "menú",
     "productos",
+    "producto",
     "lista de productos",
     "quiero ver productos",
-    "enviame el catalogo",
-    "envíame el catálogo",
-    "mandame el catalogo",
-    "mándame el catálogo",
     "que venden",
     "qué venden",
-    "que productos venden",
-    "qué productos venden",
-    "que productos tienen",
-    "qué productos tienen",
+    "que ustedes venden",
     "que otras cosas venden",
     "qué otras cosas venden",
     "que mas venden",
     "qué más venden",
     "que mas tienen",
     "qué más tienen",
-    "otras cosas venden",
-    "que otras cosas tienen",
-    "qué otras cosas tienen",
+    "opciones",
+    "ver opciones",
+    "enviame el catalogo",
+    "envíame el catálogo",
+    "mandame el catalogo",
+    "mándame el catálogo",
   ]);
 }
+
 
 function isBuyIntentText(text) {
   return hasAnyNormalized(text, [
@@ -2088,45 +2056,30 @@ function buildProductSummaryLine(product) {
   return `• *${product?.name || "Producto"}*${price ? ` — ${price}` : ""}`;
 }
 
-function getFriendlyName(greetingName) {
-  return String(greetingName || "").replace(/^\s+/, "").trim();
-}
-
-function buildCatalogOverviewReply() {
-  return `Claro 💕 te dejo el catálogo completo para que veas todo lo disponible.\n\nTenemos productos de cuidado facial, corporal, solar, cabello y suplementos. Puedes abrirlo, elegir lo que te guste y enviarme el carrito por aquí.`;
-}
-
-function buildCatalogAffirmativeReply() {
-  return `Perfecto 💕 te dejo el catálogo aquí.\n\nÁbrelo, agrega los productos que quieras al carrito y envíamelo por este chat.`;
-}
-
-function buildShortBuyingHint() {
-  return `Cuando tengas tus productos listos, envíame el carrito por aquí y seguimos con la ubicación para coordinar la entrega 📍`;
-}
-
 function buildProductPriceReply(product) {
   const price = formatRDPrice(product?.price);
   if (price) {
-    return `Sí 💕 *${product.name}* cuesta *${price}*.
+    return `Sí 💕 *${product.name}* está en *${price}*.
 
-Te dejo el catálogo para que lo agregues al carrito cuando quieras.`;
+Te dejo el catálogo para que lo agregues al carrito cuando estés lista.`;
   }
-  return `Sí 💕 tengo identificado *${product?.name || "ese producto"}*, pero no tengo un precio exacto cargado ahora mismo.
+  return `Sí 💕 tengo ubicado *${product?.name || "ese producto"}*, pero no tengo el precio exacto cargado aquí.
 
-Puedes enviarlo desde el catálogo y una representante te confirma el total.`;
+Envíalo en el carrito desde el catálogo y una representante te confirma el total.`;
 }
 
 function buildProductAvailabilityReply(product) {
   if (product?.in_stock === false) {
-    return `Ahora mismo *${product.name}* me figura como no disponible en el catálogo.
+    return `Ahora mismo *${product.name}* figura como no disponible en el catálogo 💕
 
-Puedo dejarte el catálogo para que veas opciones parecidas 💕`;
+Puedes revisar otras opciones o decirme qué buscabas para ayudarte mejor.`;
   }
   const price = formatRDPrice(product?.price);
   return `Sí 💕 tenemos *${product.name}*${price ? ` en *${price}*` : ""}.
 
-Te dejo el catálogo para que lo puedas agregar al carrito.`;
+Te dejo el catálogo para que lo agregues al carrito.`;
 }
+
 
 function buildProductInfoReply(product, intent) {
   const name = product?.name || "ese producto";
@@ -2170,71 +2123,87 @@ function buildProductMatchesReply(matches, userText) {
 
   const lines = cleanMatches.map((item) => buildProductSummaryLine(item.product));
   const intro = isPriceInquiryText(userText)
-    ? "Sí 💕 encontré estas opciones"
-    : "Sí 💕 mira estas opciones que tenemos";
+    ? "Encontré estas opciones con precio en el catálogo 💕"
+    : "Sí 💕 Mira estas opciones que encontré";
 
-  return `${intro}:\n\n${lines.join("\n")}\n\nTe dejo el catálogo para que elijas la que quieras y la agregues al carrito.`;
+  return `${intro}:
+
+${lines.join("\n")}
+
+Te dejo el catálogo para que elijas y lo agregues al carrito.`;
 }
 
 function buildBuyingInstructionsReply() {
-  return `Claro 💕 te dejo el catálogo.
+  return `Claro 💕 Te dejo el catálogo para que veas las opciones.
 
-Solo abre, agrega lo que quieras al carrito y envíamelo por aquí. Después seguimos con la ubicación para coordinar la entrega 📍`;
+Cuando elijas, agrégalo al carrito y envíamelo por aquí. Luego te pido la ubicación para coordinar la entrega.`;
 }
 
-function buildDeliveryReply() {
-  return `Sí 💕 hacemos entrega.
+function buildCatalogShortReply(reason = "catalog") {
+  if (reason === "affirmative") {
+    return `Perfecto 💕 te dejo el catálogo aquí para que veas todas las opciones.
 
-Cuando me envíes tu carrito, te pido la ubicación 📍 y una representante confirma disponibilidad, total y detalles de entrega.`;
+Cuando elijas, agrégalo al carrito y envíamelo por aquí.`;
+  }
+
+  return `Claro 💕 vendemos productos de cuidado personal, skincare y bienestar.
+
+Te dejo el catálogo completo para que puedas ver opciones y precios.`;
+}
+
+function buildGreetingReply(greetingName, referredProduct) {
+  const namePart = greetingName || "";
+  if (referredProduct?.name) {
+    const price = formatRDPrice(referredProduct.price);
+    return `¡Hola${namePart}! 💕 Veo que te interesa *${referredProduct.name}*${price ? `, está en *${price}*` : ""}.
+
+¿Quieres que te deje el catálogo para agregarlo al carrito?`;
+  }
+
+  return `¡Hola${namePart}! 💕 Bienvenida a Glowny Essentials.
+
+Dime qué producto estás buscando o abre el catálogo para ver todas las opciones.`;
+}
+
+
+function buildDeliveryReply() {
+  return `Sí 💕 Para coordinar la entrega, primero envíanos tu carrito desde el catálogo y luego tu ubicación 📍.\n\nCon eso una representante valida disponibilidad, total y detalles de envío/pago antes de confirmar.`;
 }
 
 function buildPaymentReply() {
-  return `Una representante te confirma las opciones de pago junto con el total del pedido 💕
-
-Primero envíame el carrito para validar disponibilidad y entrega.`;
+  return `Después de recibir tu carrito y ubicación, una representante te confirma el total y las opciones de pago disponibles 💕\n\nAsí evitamos darte un monto o detalle incorrecto antes de validar disponibilidad y entrega.`;
 }
 
 function buildAskProductReply(userText) {
   if (isPriceInquiryText(userText)) {
-    return `Claro 💕 ¿De cuál producto quieres saber el precio?
+    return `Claro 💕 ¿de cuál producto quieres saber el precio?
 
-Puedes escribirme el nombre o abrir el catálogo y enviarme el carrito.`;
+También puedes abrir el catálogo y decirme cuál te interesa.`;
   }
-  return `Claro 💕 dime qué producto buscas y te ayudo con precio o disponibilidad. También puedes verlo directo en el catálogo.`;
+  return `Claro 💕 dime el nombre del producto que buscas y te ayudo con precio o disponibilidad.`;
 }
 
+
 function buildWelcomeConversationalText(greetingName, referredProduct) {
-  const name = getFriendlyName(greetingName);
-  const hello = name ? `¡Hola ${name}!` : "¡Hola!";
-  const adProductLine = referredProduct?.name
-    ? (formatRDPrice(referredProduct.price)
-        ? `
-
-Vi que te interesa *${referredProduct.name}* ✨ Está en *${formatRDPrice(referredProduct.price)}*.`
-        : `
-
-Vi que te interesa *${referredProduct.name}* ✨`)
-    : "";
-
-  return `${hello} Bienvenida a Glowny Essentials 💕${adProductLine}
-
-¿Qué estás buscando hoy? Puedes escribirme el producto que quieres o tocar el catálogo para verlo completo.`;
+  return buildGreetingReply(greetingName, referredProduct);
 }
 
 function buildPriceWelcomeConversationalText(greetingName, referredProduct) {
-  const name = getFriendlyName(greetingName);
-  const hello = name ? `¡Hola ${name}!` : "¡Hola!";
   const priceLine =
     referredProduct?.name && formatRDPrice(referredProduct.price)
-      ? `*${referredProduct.name}* cuesta *${formatRDPrice(referredProduct.price)}*.`
+      ? `*${referredProduct.name}* está en *${formatRDPrice(referredProduct.price)}*.`
       : referredProduct?.name
-        ? `Veo que vienes por *${referredProduct.name}*, pero no tengo el precio exacto cargado ahora mismo.`
+        ? `Veo que vienes por *${referredProduct.name}*, pero no tengo el precio exacto cargado aquí.`
         : "";
 
-  return `${hello} 💕 ${priceLine}
+  return (
+    `¡Hola${greetingName}! 💕 ${priceLine}
 
-Te dejo el catálogo para que puedas agregarlo al carrito o ver más opciones.`;
+` +
+    `Te dejo el catálogo para que puedas agregarlo al carrito.`
+  );
 }
+
 
 async function generateConversationalAiReply({ userText, customerName, matches, referredProduct }) {
   if (!OPENAI_API_KEY || !CONVERSATIONAL_AI_ENABLED) return null;
@@ -2269,7 +2238,7 @@ async function generateConversationalAiReply({ userText, customerName, matches, 
           {
             role: "system",
             content:
-              "Eres el asistente de ventas de Glowny Essentials por WhatsApp. Responde en español dominicano/neutro, natural, cálido y breve, como una asesora atenta, pero nunca digas que eres humano. No inventes precios, disponibilidad, métodos de pago, envíos, beneficios ni diagnósticos. Usa solo el contexto del catálogo si existe. No repitas todo el flujo de compra en cada mensaje. Si el cliente pide catálogo o dice que sí después de ofrecerlo, entrégalo/guíalo directo. Mantén respuestas de máximo 4 líneas cuando sea posible.",
+              "Eres el asistente de ventas de Glowny Essentials por WhatsApp. Responde en español dominicano/neutro, natural, cálido y breve. No digas que eres humano. No inventes precios, disponibilidad, métodos de pago, envíos ni beneficios. Usa solo el contexto del catálogo si existe. Si falta información, dilo con tacto y guía al cliente a enviar el carrito o esperar una representante. Mantén respuestas de máximo 5 líneas cuando sea posible.",
           },
           {
             role: "user",
@@ -2309,22 +2278,27 @@ async function buildConversationalReply({ userText, session, customerName }) {
   const matches = findCatalogProductsByText(text, { limit: 5, minScore: 30 });
   const referredProduct = chooseProductForConversation(text, session, matches);
   const priceIntent = isPriceInquiryText(text);
-  const intent = priceIntent
-    ? "price"
-    : isCatalogIntentText(text)
-      ? "catalog"
-      : isBuyIntentText(text)
-        ? "buy"
-        : isAvailabilityIntentText(text)
-          ? "availability"
-          : isUsageIntentText(text)
-            ? "usage"
-            : isIngredientIntentText(text)
-              ? "ingredients"
-              : isWarningIntentText(text)
-                ? "warnings"
-                : isDurationIntentText(text)
-                  ? "duration"
+  const affirmativeIntent = isAffirmativeText(text);
+  const conversationMemory =
+    session && typeof session.conversational === "object" ? session.conversational : {};
+  const intent = affirmativeIntent
+    ? "affirmative"
+    : priceIntent
+      ? "price"
+    : isAvailabilityIntentText(text)
+      ? "availability"
+      : isUsageIntentText(text)
+        ? "usage"
+        : isIngredientIntentText(text)
+          ? "ingredients"
+          : isWarningIntentText(text)
+            ? "warnings"
+            : isDurationIntentText(text)
+              ? "duration"
+              : isCatalogIntentText(text)
+                ? "catalog"
+                : isBuyIntentText(text)
+                  ? "buy"
                   : isDeliveryIntentText(text)
                     ? "delivery"
                     : isPaymentIntentText(text)
@@ -2355,57 +2329,61 @@ async function buildConversationalReply({ userText, session, customerName }) {
     })),
     conversationalMode: CONVERSATIONAL_MODE,
     aiEnabled: Boolean(OPENAI_API_KEY && CONVERSATIONAL_AI_ENABLED),
+    lastOffer: conversationMemory.last_offer || null,
   });
 
-  if (isAffirmativeText(text) && !isThanksText(text)) {
+  if (intent === "greeting") {
+    const greetingName = customerName ? ` ${customerName}` : "";
     return {
       type: "cta",
-      body: buildCatalogAffirmativeReply(),
-      buttonText: "🛍️ Ver catálogo",
-      url: WHATSAPP_CATALOG_URL,
-      sessionPatch: clearPendingConversationActionPatch(),
-      chatwootNote: "BOT: Cliente afirmó/interesado. Catálogo enviado de forma conversacional.",
-    };
-  }
-
-  if (isNegativeText(text) && session?.pending_action) {
-    return {
-      type: "text",
-      body: "Está bien 💕 dime qué producto buscas o en qué te puedo ayudar.",
-      sessionPatch: clearPendingConversationActionPatch(),
-      chatwootNote: "BOT: Cliente rechazó acción pendiente. Se limpió contexto conversacional.",
-    };
-  }
-
-  if (intent === "greeting") return null; // el flujo de bienvenida existente maneja saludos.
-
-  if (intent === "catalog") {
-    return {
-      type: "cta",
-      body: buildCatalogOverviewReply(),
+      body: buildGreetingReply(greetingName, referredProduct),
       buttonText: "🛍️ Ver catálogo",
       url: WHATSAPP_CATALOG_URL,
       sessionPatch: {
-        pending_action: "send_catalog",
-        pending_action_ts: Date.now(),
-        pending_action_meta: { reason: "catalog_intent" },
+        conversational: {
+          ...conversationMemory,
+          last_intent: "greeting",
+          last_offer: "catalog",
+          last_bot_ts: Date.now(),
+        },
       },
-      chatwootNote: "BOT: Catálogo enviado por intención conversacional.",
+      chatwootNote: "BOT: Saludo conversacional enviado.",
     };
   }
 
-  if (intent === "buy") {
+  if (intent === "affirmative") {
     return {
       type: "cta",
-      body: buildBuyingInstructionsReply(),
+      body: buildCatalogShortReply("affirmative"),
       buttonText: "🛍️ Ver catálogo",
       url: WHATSAPP_CATALOG_URL,
       sessionPatch: {
-        pending_action: "send_catalog",
-        pending_action_ts: Date.now(),
-        pending_action_meta: { reason: "buy_intent" },
+        conversational: {
+          ...conversationMemory,
+          last_intent: "affirmative",
+          last_offer: "catalog",
+          last_bot_ts: Date.now(),
+        },
       },
-      chatwootNote: "BOT: Respuesta conversacional con instrucciones cortas de compra.",
+      chatwootNote: "BOT: Cliente confirmó interés; catálogo enviado de forma conversacional.",
+    };
+  }
+
+  if (intent === "catalog" || intent === "buy") {
+    return {
+      type: "cta",
+      body: intent === "catalog" ? buildCatalogShortReply("catalog") : buildBuyingInstructionsReply(),
+      buttonText: "🛍️ Ver catálogo",
+      url: WHATSAPP_CATALOG_URL,
+      sessionPatch: {
+        conversational: {
+          ...conversationMemory,
+          last_intent: intent,
+          last_offer: "catalog",
+          last_bot_ts: Date.now(),
+        },
+      },
+      chatwootNote: "BOT: Respuesta conversacional con catálogo/compra.",
     };
   }
 
@@ -2533,15 +2511,12 @@ async function buildConversationalReply({ userText, session, customerName }) {
     };
   }
 
-  const shouldUseAi = Boolean(referredProduct?.name || matches.length);
-  const aiReply = shouldUseAi
-    ? await generateConversationalAiReply({
-        userText: text,
-        customerName,
-        matches,
-        referredProduct,
-      })
-    : null;
+  const aiReply = await generateConversationalAiReply({
+    userText: text,
+    customerName,
+    matches,
+    referredProduct,
+  });
 
   if (aiReply) {
     return {
@@ -2556,12 +2531,7 @@ async function buildConversationalReply({ userText, session, customerName }) {
     body: buildAskProductReply(text),
     buttonText: "🛍️ Ver catálogo",
     url: WHATSAPP_CATALOG_URL,
-    sessionPatch: {
-      pending_action: "send_catalog",
-      pending_action_ts: Date.now(),
-      pending_action_meta: { reason: "fallback_catalog" },
-    },
-    chatwootNote: "BOT: Respuesta conversacional segura sin IA.",
+    chatwootNote: "BOT: Respuesta conversacional fallback sin IA.",
   };
 }
 
