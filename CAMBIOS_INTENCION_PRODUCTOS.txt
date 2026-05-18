@@ -1,0 +1,9 @@
+Cambios aplicados - Glowny bot humanizado con mejor detección de intención/productos
+
+- Se mantuvieron intactos los flujos existentes: carrito, ubicación, Chatwoot, CRM/Bothub, recordatorios, modo humano/bot, media, publicidad y logs.
+- Se mejoró la prioridad de decisiones para que el bot busque primero productos del catálogo antes de caer en respuestas genéricas tipo “me interesa”.
+- Ahora frases como “Me interesa el colágeno”, “Quiero un colgeno”, “Tienen magneso?”, “precio del colajeno” reconocen producto aunque estén escritas con errores.
+- Se agregó coincidencia flexible/fuzzy para palabras mal escritas, sin agregar librerías externas.
+- Se agregó memoria de último producto conversado para que respuestas como “sí”, “me interesa”, “lo quiero”, “ese mismo” mantengan el contexto.
+- Se agregaron logs más claros en “Conversacional intent”: lastProduct, strongProductMatch, productSpecificIntent y productTokens.
+- Se validó index.js con node --check.

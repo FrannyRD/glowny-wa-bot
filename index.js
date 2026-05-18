@@ -1665,10 +1665,17 @@ function isPriceInquiryText(text) {
     "que precio",
     "que precio tiene",
     "cual es el precio",
+    "cual precio",
+    "k precio",
+    "q precio",
+    "cuanto cuesta",
     "cuanto cuesta",
     "cuanto vale",
+    "cuant cuesta",
     "valor",
+    "balor",
     "costo",
+    "cuesta",
   ].some((phrase) => {
     const normalizedPhrase = normalizeMatchText(phrase);
     return normalized === normalizedPhrase || normalized.includes(normalizedPhrase);
@@ -1706,6 +1713,125 @@ function hasAnyNormalized(text, phrases) {
     const p = normalizeMatchText(phrase);
     return p && (normalized === p || normalized.includes(p));
   });
+}
+
+
+// ✅ Normalización flexible para conversación humana.
+// Ayuda con mensajes escritos rápido, sin acentos o con pequeños errores:
+// "colajeno", "colgeno", "magneso", "bloqueador", "vit c", etc.
+function collapseRepeatedLetters(value) {
+  return String(value || "").replace(/([a-z0-9])\1{2,}/gi, "$1$1");
+}
+
+function normalizeLooseToken(value) {
+  return collapseRepeatedLetters(normalizeMatchText(value));
+}
+
+function levenshteinDistance(a, b, maxDistance = 3) {
+  a = normalizeLooseToken(a);
+  b = normalizeLooseToken(b);
+  if (!a || !b) return Math.max(a.length, b.length);
+  if (a === b) return 0;
+  if (Math.abs(a.length - b.length) > maxDistance) return maxDistance + 1;
+
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  const curr = new Array(b.length + 1);
+
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i;
+    let rowMin = curr[0];
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(
+        prev[j] + 1,
+        curr[j - 1] + 1,
+        prev[j - 1] + cost
+      );
+      if (curr[j] < rowMin) rowMin = curr[j];
+    }
+    if (rowMin > maxDistance) return maxDistance + 1;
+    for (let j = 0; j <= b.length; j++) prev[j] = curr[j];
+  }
+
+  return prev[b.length];
+}
+
+function tokenLooksSimilar(a, b) {
+  a = normalizeLooseToken(a);
+  b = normalizeLooseToken(b);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.length >= 4 && b.length >= 4 && (a.includes(b) || b.includes(a))) return true;
+
+  const minLen = Math.min(a.length, b.length);
+  if (minLen < 5) return false;
+
+  const maxDistance = minLen >= 9 ? 2 : 1;
+  return levenshteinDistance(a, b, maxDistance) <= maxDistance;
+}
+
+function singularizeSearchToken(token) {
+  const t = normalizeLooseToken(token);
+  if (t.length > 5 && t.endsWith("es")) return t.slice(0, -2);
+  if (t.length > 4 && t.endsWith("s")) return t.slice(0, -1);
+  return t;
+}
+
+function getProductTokenAliases(token) {
+  const t = normalizeLooseToken(token);
+  const aliases = new Set([t, singularizeSearchToken(t)]);
+
+  const dictionary = {
+    colageno: ["colageno", "colagen", "collagen", "colageno", "colgeno", "colajeno", "colageno"],
+    colagen: ["colageno", "colagen", "collagen", "colgeno", "colajeno"],
+    collagen: ["colageno", "colagen", "collagen"],
+    colgeno: ["colageno", "colagen", "collagen"],
+    colajeno: ["colageno", "colagen", "collagen"],
+    magnesio: ["magnesio", "magnes", "magneso", "magnesium"],
+    magnes: ["magnesio", "magnes", "magneso"],
+    magneso: ["magnesio", "magnes"],
+    bloqueador: ["protector", "solar", "fps", "spf", "bloqueador"],
+    protector: ["protector", "solar", "fps", "spf", "bloqueador"],
+    bloqueadorr: ["protector", "solar", "fps", "spf", "bloqueador"],
+    sunscreen: ["protector", "solar", "fps", "spf"],
+    vitamina: ["vitamina", "vit", "vitaminas"],
+    vitmina: ["vitamina", "vit", "vitaminas"],
+    vitamin: ["vitamina", "vit", "vitaminas"],
+    vit: ["vitamina", "vit"],
+    hialuronico: ["hialuronico", "hialuron", "hyaluronic"],
+    hyaluronic: ["hialuronico", "hialuron", "hyaluronic"],
+    niacinamida: ["niacinamida", "niacinamide"],
+    niacinamide: ["niacinamida", "niacinamide"],
+    desodorante: ["desodorante", "deodorant", "alumbre", "deonat"],
+    deodorant: ["desodorante", "deodorant", "alumbre", "deonat"],
+    aloe: ["aloe", "vera"],
+    nivia: ["nivea"],
+    nivea: ["nivea"],
+    crema: ["crema", "locion", "lotion"],
+    locion: ["locion", "crema", "lotion"],
+    lotion: ["locion", "crema", "lotion"],
+    gel: ["gel"],
+    zinc: ["zinc"],
+    zink: ["zinc"],
+  };
+
+  for (const alias of dictionary[t] || []) aliases.add(normalizeLooseToken(alias));
+
+  // Casos escritos pegados o abreviados: "vitc", "vit c", "spf50", "fps50".
+  if (/^vit[a-z]*c$/.test(t) || t === "vc") aliases.add("vitamina"), aliases.add("c");
+  if (/^(spf|fps)\d+$/i.test(t)) aliases.add(t.slice(0, 3).toLowerCase()), aliases.add(t.replace(/^(spf|fps)/i, ""));
+
+  return [...aliases].filter(Boolean);
+}
+
+function expandProductSearchTokens(tokens) {
+  const out = new Set();
+  for (const token of Array.isArray(tokens) ? tokens : []) {
+    for (const alias of getProductTokenAliases(token)) {
+      if (alias && alias.length >= 2) out.add(alias);
+    }
+  }
+  return [...out];
 }
 
 function isThanksText(text) {
@@ -1792,6 +1918,12 @@ function isBuyIntentText(text) {
     "comprar",
     "lo quiero",
     "me interesa",
+    "me intereza",
+    "me intresa",
+    "me interesa el",
+    "me interesa la",
+    "me interesa un",
+    "me interesa una",
     "deseo comprar",
     "quiero pedir",
   ]);
@@ -1802,7 +1934,11 @@ function isAvailabilityIntentText(text) {
     "disponible",
     "disponibilidad",
     "tienen",
+    "tiene",
     "tienes",
+    "tienn",
+    "tienem",
+    "ay",
     "hay",
     "lo tienen",
     "esta disponible",
@@ -1980,10 +2116,13 @@ const PRODUCT_QUERY_STOPWORDS = new Set([
 ]);
 
 function productSearchTokens(text) {
-  return normalizeMatchText(text)
+  const baseTokens = normalizeMatchText(text)
     .split(" ")
-    .map((token) => token.trim())
-    .filter((token) => token.length >= 3 && !PRODUCT_QUERY_STOPWORDS.has(token));
+    .map((token) => singularizeSearchToken(token.trim()))
+    .filter((token) => token.length >= 2 && !PRODUCT_QUERY_STOPWORDS.has(token));
+
+  return expandProductSearchTokens(baseTokens)
+    .filter((token) => token.length >= 2 && !PRODUCT_QUERY_STOPWORDS.has(token));
 }
 
 function scoreProductForUserText(userText, product) {
@@ -1997,20 +2136,36 @@ function scoreProductForUserText(userText, product) {
   if (normalizedText.includes(normalizedName) || normalizedName.includes(normalizedText)) score += 90;
 
   const userTokens = [...new Set(productSearchTokens(userText))];
-  const productTokens = new Set(
+  const productTokenList = expandProductSearchTokens(
     [
       ...normalizeMatchText(product?.name).split(" "),
       ...normalizeMatchText(product?.category).split(" "),
       ...normalizeMatchText(product?.type).split(" "),
-    ].filter((token) => token.length >= 3)
+    ].filter((token) => token.length >= 2)
   );
+  const productTokens = new Set(productTokenList.filter((token) => token.length >= 2));
 
-  const overlap = userTokens.filter((token) => productTokens.has(token));
-  score += overlap.length * 18;
+  let exactOverlap = 0;
+  let fuzzyOverlap = 0;
 
-  if (userTokens.length && overlap.length === userTokens.length) score += 22;
-  if (overlap.length >= 2) score += 12;
-  if (overlap.length >= 3) score += 18;
+  for (const token of userTokens) {
+    if (productTokens.has(token)) {
+      exactOverlap += 1;
+      continue;
+    }
+
+    // Tolerancia para errores de escritura: colajeno/colgeno, magneso, bloquiador, etc.
+    const similar = [...productTokens].some((productToken) => tokenLooksSimilar(token, productToken));
+    if (similar) fuzzyOverlap += 1;
+  }
+
+  const overlap = exactOverlap + fuzzyOverlap;
+  score += exactOverlap * 22;
+  score += fuzzyOverlap * 15;
+
+  if (userTokens.length && overlap === userTokens.length) score += 24;
+  if (overlap >= 2) score += 14;
+  if (overlap >= 3) score += 18;
 
   // Señales por campos descriptivos, con menor peso para evitar falsos positivos.
   const extraText = normalizeMatchText(
@@ -2040,15 +2195,87 @@ function getSessionAdProduct(session) {
   return full || adProduct;
 }
 
+function lookupProductFromStoredReference(storedProduct) {
+  if (!storedProduct) return null;
+  const storedId = storedProduct.id || storedProduct.meta_id || storedProduct.productId || storedProduct.product_id;
+  if (storedId) {
+    const found =
+      lookupProductByRetailerId(storedId) ||
+      productIndex.find((p) => String(p.data.id) === String(storedId))?.data ||
+      null;
+    if (found) return found;
+  }
+
+  if (storedProduct.name) {
+    const matches = findCatalogProductsByText(storedProduct.name, { limit: 1, minScore: 30 });
+    if (matches?.[0]?.product) return matches[0].product;
+  }
+
+  return null;
+}
+
+function getSessionLastProduct(session) {
+  const memory = session && typeof session.conversational === "object" ? session.conversational : {};
+  return lookupProductFromStoredReference(memory.last_product || null);
+}
+
+function shouldUseLastProductForText(userText) {
+  const text = String(userText || "").trim();
+  if (!text) return false;
+  if (isGreetingOnly(text) || isCatalogIntentText(text)) return false;
+  return (
+    isPriceInquiryText(text) ||
+    isAvailabilityIntentText(text) ||
+    isBuyIntentText(text) ||
+    isUsageIntentText(text) ||
+    isIngredientIntentText(text) ||
+    isWarningIntentText(text) ||
+    isDurationIntentText(text) ||
+    isAffirmativeText(text) ||
+    hasAnyNormalized(text, ["ese", "esa", "ese mismo", "esa misma", "el mismo", "la misma", "lo quiero", "quiero ese", "me interesa"])
+  );
+}
+
 function chooseProductForConversation(userText, session, matches = []) {
   const adProduct = getSessionAdProduct(session);
+  const lastProduct = getSessionLastProduct(session);
   const priceIntent = isPriceInquiryText(userText);
   const genericText = isGreetingOnly(userText) || priceIntent || isCatalogIntentText(userText) || isBuyIntentText(userText);
 
+  if (matches?.[0]?.product && matches[0].score >= 36) return matches[0].product;
   if (adProduct && (priceIntent || genericText || matches.length === 0)) return adProduct;
-  if (matches?.[0]?.product && matches[0].score >= 42) return matches[0].product;
+  if (lastProduct && shouldUseLastProductForText(userText)) return lastProduct;
   if (adProduct) return adProduct;
   return null;
+}
+
+function buildProductMemoryPatch(conversationMemory, product, lastIntent = "product") {
+  if (!product?.name) {
+    return {
+      conversational: {
+        ...conversationMemory,
+        last_intent: lastIntent,
+        last_bot_ts: Date.now(),
+      },
+    };
+  }
+
+  return {
+    conversational: {
+      ...conversationMemory,
+      last_intent: lastIntent,
+      last_offer: "product",
+      last_product: {
+        id: product.id,
+        meta_id: product.meta_id,
+        name: product.name,
+        price: product.price,
+        category: product.category,
+        type: product.type,
+      },
+      last_bot_ts: Date.now(),
+    },
+  };
 }
 
 function buildProductSummaryLine(product) {
@@ -2281,6 +2508,8 @@ async function buildConversationalReply({ userText, session, customerName }) {
   const affirmativeIntent = isAffirmativeText(text);
   const conversationMemory =
     session && typeof session.conversational === "object" ? session.conversational : {};
+  const strongProductMatch = Boolean(matches?.[0]?.product && (matches[0].score >= 36 || productSearchTokens(text).length === 1));
+  const productSpecificIntent = strongProductMatch && !isGreetingOnly(text) && !isCatalogIntentText(text);
   const intent = affirmativeIntent
     ? "affirmative"
     : priceIntent
@@ -2295,25 +2524,27 @@ async function buildConversationalReply({ userText, session, customerName }) {
             ? "warnings"
             : isDurationIntentText(text)
               ? "duration"
-              : isCatalogIntentText(text)
-                ? "catalog"
-                : isBuyIntentText(text)
-                  ? "buy"
-                  : isDeliveryIntentText(text)
-                    ? "delivery"
-                    : isPaymentIntentText(text)
-                      ? "payment"
-                      : isComplaintIntentText(text)
-                        ? "complaint"
-                        : isHumanHelpIntentText(text)
-                          ? "human"
-                          : isThanksText(text)
-                            ? "thanks"
-                            : isGreetingOnly(text)
-                              ? "greeting"
-                              : matches.length
-                                ? "product_search"
-                                : "unknown";
+              : productSpecificIntent
+                ? "product_search"
+                : isCatalogIntentText(text)
+                  ? "catalog"
+                  : isBuyIntentText(text)
+                    ? "buy"
+                    : isDeliveryIntentText(text)
+                      ? "delivery"
+                      : isPaymentIntentText(text)
+                        ? "payment"
+                        : isComplaintIntentText(text)
+                          ? "complaint"
+                          : isHumanHelpIntentText(text)
+                            ? "human"
+                            : isThanksText(text)
+                              ? "thanks"
+                              : isGreetingOnly(text)
+                                ? "greeting"
+                                : matches.length
+                                  ? "product_search"
+                                  : "unknown";
 
   debugJson("🧠 Conversacional intent", {
     userText: text,
@@ -2330,6 +2561,10 @@ async function buildConversationalReply({ userText, session, customerName }) {
     conversationalMode: CONVERSATIONAL_MODE,
     aiEnabled: Boolean(OPENAI_API_KEY && CONVERSATIONAL_AI_ENABLED),
     lastOffer: conversationMemory.last_offer || null,
+    lastProduct: conversationMemory.last_product?.name || null,
+    strongProductMatch,
+    productSpecificIntent,
+    productTokens: productSearchTokens(text),
   });
 
   if (intent === "greeting") {
@@ -2352,6 +2587,17 @@ async function buildConversationalReply({ userText, session, customerName }) {
   }
 
   if (intent === "affirmative") {
+    if (referredProduct?.name && conversationMemory.last_offer === "product") {
+      return {
+        type: "cta",
+        body: `Perfecto 💕 te dejo el catálogo para que agregues *${referredProduct.name}* al carrito y me lo envíes por aquí.`,
+        buttonText: "🛍️ Ver catálogo",
+        url: WHATSAPP_CATALOG_URL,
+        sessionPatch: buildProductMemoryPatch(conversationMemory, referredProduct, "affirmative_product"),
+        chatwootNote: `BOT: Cliente confirmó interés por ${referredProduct.name}.`,
+      };
+    }
+
     return {
       type: "cta",
       body: buildCatalogShortReply("affirmative"),
@@ -2370,6 +2616,17 @@ async function buildConversationalReply({ userText, session, customerName }) {
   }
 
   if (intent === "catalog" || intent === "buy") {
+    if (intent === "buy" && referredProduct?.name) {
+      return {
+        type: "cta",
+        body: buildProductAvailabilityReply(referredProduct),
+        buttonText: "🛍️ Ver catálogo",
+        url: WHATSAPP_CATALOG_URL,
+        sessionPatch: buildProductMemoryPatch(conversationMemory, referredProduct, "buy_product"),
+        chatwootNote: `BOT: Intención de compra con producto detectado (${referredProduct.name}).`,
+      };
+    }
+
     return {
       type: "cta",
       body: intent === "catalog" ? buildCatalogShortReply("catalog") : buildBuyingInstructionsReply(),
@@ -2434,6 +2691,7 @@ async function buildConversationalReply({ userText, session, customerName }) {
         body: buildProductPriceReply(referredProduct),
         buttonText: "🛍️ Ver catálogo",
         url: WHATSAPP_CATALOG_URL,
+        sessionPatch: buildProductMemoryPatch(conversationMemory, referredProduct, "price_product"),
         chatwootNote: `BOT: Respuesta conversacional de precio para ${referredProduct.name}.`,
       };
     }
@@ -2467,6 +2725,7 @@ async function buildConversationalReply({ userText, session, customerName }) {
         body,
         buttonText: "🛍️ Ver catálogo",
         url: WHATSAPP_CATALOG_URL,
+        sessionPatch: buildProductMemoryPatch(conversationMemory, referredProduct, `${intent}_product`),
         chatwootNote: `BOT: Respuesta conversacional ${intent} para ${referredProduct.name}.`,
       };
     }
@@ -2498,6 +2757,7 @@ async function buildConversationalReply({ userText, session, customerName }) {
         body: buildProductAvailabilityReply(p),
         buttonText: "🛍️ Ver catálogo",
         url: WHATSAPP_CATALOG_URL,
+        sessionPatch: buildProductMemoryPatch(conversationMemory, p, "product_search"),
         chatwootNote: `BOT: Producto detectado por conversación (${p.name}).`,
       };
     }
