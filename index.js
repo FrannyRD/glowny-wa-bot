@@ -44,9 +44,33 @@ const BOTHUB_API_BASE_URL =
 const BOTHUB_JWT_TOKEN =
   (process.env.BOTHUB_JWT_TOKEN || process.env.CRM_JWT_TOKEN || "").trim();
 const BOTHUB_BOT_ID = (process.env.BOTHUB_BOT_ID || "").trim();
+// ✅ Protección de bandejas CRM (NUEVO)
+// El CRM es quien debe conservar la bandeja manual de cada conversación.
+// Por defecto el bot NO envía queue/queueName en mensajes entrantes para evitar
+// que un cliente movido manualmente a Pedidos, Santo Domingo, Interior, etc.
+// vuelva automáticamente a Nuevos cuando escriba otro día.
+const BOTHUB_PRESERVE_MANUAL_QUEUE = String(
+  process.env.BOTHUB_PRESERVE_MANUAL_QUEUE ||
+    process.env.CRM_PRESERVE_MANUAL_QUEUE ||
+    "true"
+)
+  .trim()
+  .toLowerCase() !== "false";
+
+// Compatibilidad opcional con el comportamiento anterior.
+// Solo si necesitas forzar desde el bot una bandeja inicial, pon:
+// BOTHUB_ATTACH_DEFAULT_QUEUE=true
+const BOTHUB_ATTACH_DEFAULT_QUEUE = String(
+  process.env.BOTHUB_ATTACH_DEFAULT_QUEUE ||
+    process.env.CRM_ATTACH_DEFAULT_QUEUE ||
+    "false"
+)
+  .trim()
+  .toLowerCase() === "true";
+
 // ✅ Bandeja por defecto en el CRM para primeros mensajes entrantes.
-// Se usa solo cuando el bot aún no tiene conversación enlazada en Bothub,
-// para evitar mover conversaciones existentes de otras bandejas.
+// Nota: por seguridad NO se envía salvo que BOTHUB_ATTACH_DEFAULT_QUEUE=true.
+// Esto evita mover conversaciones existentes de otras bandejas.
 const BOTHUB_DEFAULT_QUEUE_NAME = (
   process.env.BOTHUB_DEFAULT_QUEUE_NAME ||
   process.env.BOTHUB_QUEUE_NAME ||
@@ -1082,6 +1106,13 @@ function isAutomationBlocked(session) {
 function shouldAttachDefaultBothubQueue(session) {
   if (!BOTHUB_DEFAULT_QUEUE_NAME) return false;
 
+  // ✅ Protección principal: por defecto el bot conserva la bandeja que tenga el CRM.
+  // Así, si un agente movió la conversación a Pedidos/Santo Domingo/Interior/etc.,
+  // un nuevo mensaje del cliente no la devuelve a Nuevos.
+  if (BOTHUB_PRESERVE_MANUAL_QUEUE && !BOTHUB_ATTACH_DEFAULT_QUEUE) {
+    return false;
+  }
+
   // Si ya Bothub devolvió conversationId, no enviamos queue para no mover
   // conversaciones existentes a Nuevos accidentalmente.
   if (session?.hubConversationId) return false;
@@ -1113,6 +1144,8 @@ async function reportInboundToBothub({ session, from, name, msg, bodyText }) {
       ...inboundMeta,
       queue: defaultQueueName || undefined,
       queueName: defaultQueueName || undefined,
+      preserveManualQueue: BOTHUB_PRESERVE_MANUAL_QUEUE,
+      queuePolicy: defaultQueueName ? "attach_default_queue" : "preserve_existing_queue",
     },
   };
   debugJson("📨 reportInboundToBothub", payload);
@@ -4274,6 +4307,9 @@ app.listen(PORT, () => {
     hasBothubWebhookUrl: Boolean(BOTHUB_WEBHOOK_URL),
     hasBothubWebhookSecret: Boolean(BOTHUB_WEBHOOK_SECRET),
     hasBothubJwt: Boolean(BOTHUB_JWT_TOKEN),
+    preserveManualQueue: BOTHUB_PRESERVE_MANUAL_QUEUE,
+    attachDefaultQueue: BOTHUB_ATTACH_DEFAULT_QUEUE,
+    defaultQueueName: BOTHUB_DEFAULT_QUEUE_NAME || null,
     hasBotPublicBaseUrl: Boolean(getStaticPublicBaseUrl()),
     conversationalMode: CONVERSATIONAL_MODE,
     conversationalAiEnabled: CONVERSATIONAL_AI_ENABLED,

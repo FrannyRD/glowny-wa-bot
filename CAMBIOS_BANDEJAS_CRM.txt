@@ -1,0 +1,27 @@
+Cambios aplicados - Protección de bandejas CRM
+
+Objetivo:
+Evitar que una conversación movida manualmente a una bandeja del CRM (Pedidos, Santo Domingo, Interior, En Curso, Pedidos completados, etc.) vuelva automáticamente a "Nuevos" cuando el cliente escriba nuevamente al día siguiente.
+
+Cambios:
+1. Se agregó BOTHUB_PRESERVE_MANUAL_QUEUE=true por defecto.
+2. Se agregó BOTHUB_ATTACH_DEFAULT_QUEUE=false por defecto.
+3. El bot ya no envía queue/queueName en mensajes inbound por defecto.
+4. El CRM conserva la bandeja actual de la conversación hasta que el usuario/agente la mueva manualmente.
+5. Se mantiene compatibilidad con la lógica anterior si se necesita forzar desde el bot:
+   - BOTHUB_ATTACH_DEFAULT_QUEUE=true
+6. Se agregaron datos de diagnóstico en meta:
+   - preserveManualQueue
+   - queuePolicy
+7. Se agregaron flags al log de arranque:
+   - preserveManualQueue
+   - attachDefaultQueue
+   - defaultQueueName
+
+Nota:
+La recomendación para el CRM en vivo es dejar:
+BOTHUB_PRESERVE_MANUAL_QUEUE=true
+BOTHUB_ATTACH_DEFAULT_QUEUE=false
+
+Validación:
+node --check index.js ejecutado correctamente.
